@@ -50,12 +50,18 @@ PURE_PATH_MEMBERS = (
     # methods
     Member("joinpath", result=PATH),
     Member("with_name", result=PATH),
-    Member("with_stem", result=PATH),
+    # with_stem / is_relative_to were added to pathlib in 3.9; synthesize them
+    # so the surface is uniform on the 3.8 floor.
+    Member(
+        "with_stem", result=PATH, fallback="with_stem", needs=("with_name",)
+    ),
     Member("with_suffix", result=PATH),
     Member("as_posix"),
     Member("as_uri"),
     Member("is_absolute"),
-    Member("is_relative_to"),
+    Member(
+        "is_relative_to", fallback="is_relative_to", needs=("relative_to",)
+    ),
     Member("relative_to", result=PATH, normalize=(("walk_up", False),)),
     # matching: delegate-or-raise for now; a vendored glob.translate fallback
     # gives these consistent semantics across drivers in a later phase.

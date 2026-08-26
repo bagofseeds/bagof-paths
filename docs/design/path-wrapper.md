@@ -91,7 +91,7 @@ From `abczarr` (the only current consumer), measured by grep across the repo:
   **explicitly** (`p.rmdir(recursive=True)` in `drivers/tensorstore.py`), so a
   safe non-recursive default costs the consumer nothing (§5).
 - **Downstream subclasses the wrapper.** `abczarr.abc.path.StorePath` adds a
-  `read_only` flag and then re-declares six protocol subclasses plus six more
+  `read_only` flag and then redeclares six protocol subclasses plus six more
   for the async variant — 12 near-empty classes, purely to thread the subclass
   through the reference's protocol dispatch. Worse, `register_subclass` writes
   into a registry **shared with the base**, so importing `abczarr.abc.path`

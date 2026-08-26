@@ -64,10 +64,27 @@ def write_text(
     return wrapper.write_bytes(encoded)
 
 
+def with_stem(wrapper: tx.Any, stem: str) -> tx.Any:
+    """``with_stem`` from ``with_name`` (pathlib gained it in 3.9)."""
+    wrapped = wrapper._wrapped
+    return wrapped.with_name(stem + wrapped.suffix)
+
+
+def is_relative_to(wrapper: tx.Any, other: tx.Any) -> bool:
+    """``is_relative_to`` from ``relative_to`` (pathlib gained it in 3.9)."""
+    try:
+        wrapper._wrapped.relative_to(other)
+    except ValueError:
+        return False
+    return True
+
+
 # name -> synthesis function, resolved by the engine from a Member.fallback.
 FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
     "read_bytes": read_bytes,
     "read_text": read_text,
     "write_bytes": write_bytes,
     "write_text": write_text,
+    "with_stem": with_stem,
+    "is_relative_to": is_relative_to,
 }
