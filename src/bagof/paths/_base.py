@@ -104,6 +104,14 @@ class BaseWrapper:
         new._wrapped = wrapped
         return new
 
+    def _coerce_target(self, target: tx.Any) -> tx.Any:
+        """A copy/move target as a bare driver path of this path's kind."""
+        if isinstance(target, BaseWrapper):
+            return target._wrapped
+        if isinstance(target, str):
+            return type(self._wrapped)(target)
+        return target
+
     # -- location (generic; refined per-driver by the adapter layer) --------
     @property
     def protocol(self) -> str:
