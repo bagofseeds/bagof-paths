@@ -7,6 +7,7 @@ import os
 import typing_extensions as tx
 
 from . import _engine as engine
+from . import _match
 from ._base import BaseWrapper
 from ._spec import BY_NAME
 
@@ -110,19 +111,22 @@ class Path(BaseWrapper):
     def match(
         self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
     ) -> bool:
-        """Whether the path matches the given glob-style ``pattern``."""
-        return engine.invoke(
-            self, BY_NAME["match"], (pattern,),
-            {"case_sensitive": case_sensitive},
-        )
+        """Whether the path matches ``pattern``, anchored from the right.
+
+        Matching is lexical and consistent across drivers: it runs on the
+        canonical path, not on the wrapped object.
+        """
+        return _match.match(self.path, pattern, case_sensitive=case_sensitive)
 
     def full_match(
         self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
     ) -> bool:
-        """Whether the whole path matches the given ``pattern``."""
-        return engine.invoke(
-            self, BY_NAME["full_match"], (pattern,),
-            {"case_sensitive": case_sensitive},
+        """Whether the whole path matches ``pattern`` (``**`` spans segments).
+
+        Uses CPython 3.13's glob semantics on every interpreter.
+        """
+        return _match.full_match(
+            self.path, pattern, case_sensitive=case_sensitive
         )
 
     # -- status queries ----------------------------------------------------

@@ -53,6 +53,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+# Every pattern must name a file at the repository root: a subdirectory
+# pattern is accepted here and then silently dropped by setuptools < 77, so
+# the file never reaches the wheel. tests/test_licensing.py enforces this.
+license-files = ["LICENSE", "LICENSE-PSF-2.0.txt", "NOTICE.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -63,10 +63,9 @@ PURE_PATH_MEMBERS = (
         "is_relative_to", fallback="is_relative_to", needs=("relative_to",)
     ),
     Member("relative_to", result=PATH, normalize=(("walk_up", False),)),
-    # matching: delegate-or-raise for now; a vendored glob.translate fallback
-    # gives these consistent semantics across drivers in a later phase.
-    Member("match", normalize=(("case_sensitive", None),)),
-    Member("full_match", normalize=(("case_sensitive", None),)),
+    # match / full_match are not delegated: they are computed lexically on the
+    # canonical path (see _match.py) so their semantics are identical across
+    # drivers and Python versions.
 )
 
 # The concrete surface: members that reach a filesystem. Copy/move, recursive

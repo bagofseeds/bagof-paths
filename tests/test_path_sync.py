@@ -69,9 +69,10 @@ def test_relative_to_unwraps_wrapper_argument() -> None:
     assert p.is_relative_to(Path("/x")) is False
 
 
-def test_match_delegates() -> None:
+def test_match_computed() -> None:
     assert Path("/a/b/c.txt").match("*.txt") is True
     assert Path("/a/b/c.txt").match("*.bin") is False
+    assert Path("/a/b/c.txt").match("b/*.txt") is True  # anchored from right
 
 
 def test_fspath_local_returns_str() -> None:
@@ -99,13 +100,15 @@ def test_supports() -> None:
     assert p.supports("__init__") is False
 
 
-def test_full_match_unsupported_without_delegate() -> None:
-    # A driver lacking full_match, with no fallback wired yet -> unsupported,
-    # on every interpreter (not just pre-3.13 pathlib).
-    p = Path(_NoFullMatch())
-    assert p.supports("full_match") is False
-    with pytest.raises(UnsupportedPathOperation):
-        p.full_match("*")
+def test_full_match_computed_regardless_of_driver() -> None:
+    # full_match is computed lexically on the canonical path, so it works even
+    # on a driver that implements no full_match of its own.
+    p = Path(_NoFullMatch())  # str() == "/a/b"
+    assert p.supports("full_match") is True
+    assert p.full_match("/a/b") is True
+    assert p.full_match("/a/*") is True
+    assert p.full_match("/x/*") is False
+    assert p.full_match("**/b") is True
 
 
 def test_url_string_needs_a_driver() -> None:
