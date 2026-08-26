@@ -1,16 +1,28 @@
-# bagof-things
+# bagof-paths
 
-Template repository for `bagof` Python projects.
+A uniform, `pathlib`-style API over any path-like object — the stdlib
+`pathlib.Path`, [`universal-pathlib`](https://github.com/fsspec/universal_pathlib)'s
+`UPath`, [`cloudpathlib`](https://github.com/drivendataorg/cloudpathlib)'s
+`AnyPath`, and unknown drivers alike.
 
-This template includes:
+`bagof.paths` wraps a path object and exposes one consistent surface on top of
+it. For each member of that surface it either:
 
-- a `pyproject.toml` configured for a `bagof.things` package
-- a `bagof` namespace package under `src/`
-- reusable GitHub Actions for linting, testing, and publishing
+- **delegates** to the wrapped object when it implements it,
+- **falls back** to a synthesized implementation when it does not (for example,
+  `read_text` from `read_bytes`, `read_bytes` from `open`, `copy` from
+  `shutil`), or
+- **raises** a single, well-named error when neither is possible.
 
-The workflow wrappers intentionally track `bagofseeds/actions@main` so
-template-generated repositories inherit shared CI updates without manually
-refreshing pinned workflow SHAs.
+A sync wrapper (`Path`) and an async wrapper (`AsyncPath`) share the same
+surface; the async wrapper bridges a blocking driver by running it in a worker
+thread.
 
-When using the template, replace `things` with your project-specific package
-name.
+> **Status: in design.** The architecture and public surface are written up in
+> [`docs/design/path-wrapper.md`](docs/design/path-wrapper.md); implementation
+> is landing in phases. The core wraps stdlib `pathlib` with no third-party
+> dependency; `upath` and `cloudpathlib` are optional extras.
+
+The workflow wrappers intentionally track `bagofseeds/actions@main` so the
+repository inherits shared CI updates without manually refreshing pinned
+workflow SHAs.
