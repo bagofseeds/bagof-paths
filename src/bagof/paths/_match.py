@@ -156,19 +156,31 @@ def _glob_translate(
     return rf"(?s:{res})\Z"
 
 
+def _normalize(text: str) -> str:
+    """Collapse ``//`` and drop ``.`` segments, the way PurePath parsing does.
+
+    pathlib's full_match routes both the path and the pattern through a
+    PurePath before matching; mirroring that keeps us identical to it.
+    """
+    root = _SEP if text.startswith(_SEP) else ""
+    parts = [part for part in text.split(_SEP) if part not in ("", ".")]
+    return root + _SEP.join(parts)
+
+
 def full_match(
     path: str, pattern: str, *, case_sensitive: tx.Optional[bool] = None
 ) -> bool:
     """Whether the whole ``path`` matches ``pattern`` (``**`` spans segments).
 
-    Uses CPython 3.13's glob semantics on every interpreter.
+    Uses CPython 3.13's glob semantics on every interpreter. Patterns are
+    trusted input -- a pathological pattern can backtrack, exactly as the
+    stdlib matcher it is ported from does.
     """
-    pat = pattern.rstrip(_SEP) or pattern
     regex = _glob_translate(
-        pat, recursive=True, include_hidden=True, seps=_SEP
+        _normalize(pattern), recursive=True, include_hidden=True, seps=_SEP
     )
     flags = re.IGNORECASE if case_sensitive is False else 0
-    return re.match(regex, path, flags) is not None
+    return re.match(regex, _normalize(path), flags) is not None
 
 
 def match(

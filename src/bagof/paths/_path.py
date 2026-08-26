@@ -303,13 +303,12 @@ class Path(BaseWrapper):
     ) -> tx.Self:
         """Copy this file or directory to ``target``; return the new path."""
         driver_target = self._coerce_target(target)
-        adapter = _drivers.adapter_for(self._wrapped)
-        result = adapter.copy(
+        _drivers.adapter_for(self._wrapped).copy(
             self, driver_target,
             follow_symlinks=follow_symlinks,
             preserve_metadata=preserve_metadata,
         )
-        return self.with_wrapped(driver_target if result is None else result)
+        return self.with_wrapped(driver_target)
 
     def copy_into(
         self,
@@ -329,9 +328,8 @@ class Path(BaseWrapper):
     def move(self, target: tx.Any) -> tx.Self:
         """Move this path to ``target``; return the new path."""
         driver_target = self._coerce_target(target)
-        adapter = _drivers.adapter_for(self._wrapped)
-        result = adapter.move(self, driver_target)
-        return self.with_wrapped(driver_target if result is None else result)
+        _drivers.adapter_for(self._wrapped).move(self, driver_target)
+        return self.with_wrapped(driver_target)
 
     def move_into(self, target_dir: tx.Any) -> tx.Self:
         """Move into ``target_dir``, keeping this path's name."""
@@ -374,8 +372,12 @@ class Path(BaseWrapper):
 
     def rename(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target`` and return the new path."""
-        return engine.invoke(self, BY_NAME["rename"], (target,))
+        return engine.invoke(
+            self, BY_NAME["rename"], (self._coerce_target(target),)
+        )
 
     def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target``, replacing any existing file."""
-        return engine.invoke(self, BY_NAME["replace"], (target,))
+        return engine.invoke(
+            self, BY_NAME["replace"], (self._coerce_target(target),)
+        )

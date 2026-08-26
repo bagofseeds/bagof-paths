@@ -27,7 +27,12 @@ from pathlib import Path as LocalPath
 
 import typing_extensions as tx
 
-from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
+from ._constants import (
+    ADAPTER_MEMBERS,
+    COMPUTED_MEMBERS,
+    LOCAL_PROTOCOLS,
+    SCHEME_RE,
+)
 from ._errors import UnsupportedPathOperation
 from ._spec import BY_NAME
 
@@ -80,15 +85,34 @@ class BaseWrapper:
         filesystem probe.
         """
         member = BY_NAME.get(name)
-        if member is None:
-            # The location properties (protocol, path, drive, ...) and other
-            # non-underscore members resolve directly.
-            return not name.startswith("_") and hasattr(self, name)
-        if hasattr(self._wrapped, member.name):
+        if member is not None:
+            if hasattr(self._wrapped, member.name):
+                return True
+            if member.fallback and all(
+                self.supports(n) for n in member.needs
+            ):
+                return True
+            return False
+        if name in ADAPTER_MEMBERS:
+            return self._supports_adapter_member(name)
+        if name in COMPUTED_MEMBERS:
             return True
-        if member.fallback and all(self.supports(n) for n in member.needs):
-            return True
-        return False
+        # Location properties (protocol, path, drive, ...) resolve directly.
+        return not name.startswith("_") and hasattr(self, name)
+
+    def _supports_adapter_member(self, name: str) -> bool:
+        wrapped = self._wrapped
+        if name == "rmdir":
+            return hasattr(wrapped, "rmdir")
+        if name == "walk":
+            return hasattr(wrapped, "walk") or self.supports("iterdir")
+        # copy / copy_into / move / move_into
+        return self.protocol in LOCAL_PROTOCOLS or hasattr(wrapped, "copy")
+
+    def capabilities(self) -> tx.FrozenSet[str]:
+        """The set of members that are wired for this path (see supports)."""
+        names = set(BY_NAME) | ADAPTER_MEMBERS | COMPUTED_MEMBERS
+        return frozenset(name for name in names if self.supports(name))
 
     # -- derivation ---------------------------------------------------------
     def with_wrapped(self, wrapped: tx.Any) -> tx.Self:
@@ -105,11 +129,26 @@ class BaseWrapper:
         return new
 
     def _coerce_target(self, target: tx.Any) -> tx.Any:
-        """A copy/move target as a bare driver path of this path's kind."""
+        """A copy/move/rename target as a bare driver path of this kind.
+
+        A string is turned into a path *through the wrapped object* so its
+        driver configuration (UPath storage options, a cloudpathlib client)
+        carries onto the target; a string naming a different scheme is
+        refused, the same way the constructor refuses one.
+        """
         if isinstance(target, BaseWrapper):
             return target._wrapped
         if isinstance(target, str):
-            return type(self._wrapped)(target)
+            match = SCHEME_RE.match(target)
+            if match and match.group(1) != self.protocol:
+                raise ValueError(
+                    f"a target like {target!r} names a different scheme; "
+                    "pass a wrapped path instead of a string"
+                )
+            wrapped = self._wrapped
+            if hasattr(wrapped, "with_segments"):
+                return wrapped.with_segments(target)
+            return type(wrapped)(target)
         return target
 
     # -- location (generic; refined per-driver by the adapter layer) --------

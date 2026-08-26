@@ -117,8 +117,10 @@ IO_MEMBERS = (
         normalize=(("mode", 0o777), ("parents", False), ("exist_ok", False)),
     ),
     Member("touch", IO, normalize=(("mode", 0o666), ("exist_ok", True))),
-    # removal
-    Member("unlink", IO, normalize=(("missing_ok", False),)),
+    # removal -- missing_ok is always forwarded (not normalized away),
+    # because cloudpathlib's own default is True: dropping our False default
+    # would silently adopt it and make unlink() succeed on a missing file.
+    Member("unlink", IO),
     # resolving / expanding (return a path)
     Member("resolve", IO, result=PATH, normalize=(("strict", False),)),
     Member("absolute", IO, result=PATH),
