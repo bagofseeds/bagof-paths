@@ -30,23 +30,7 @@ class Path(BaseWrapper):
     :class:`~bagof.paths.UnsupportedPathOperation`.
     """
 
-    # -- capability introspection ------------------------------------------
-    def supports(self, name: str) -> bool:
-        """Whether ``name`` is wired for this path.
-
-        Answers "is this operation available" -- by delegation or by a
-        synthesized fallback -- not "will a call succeed on this particular
-        path". It is a static property of the wrapped object, not a
-        filesystem probe.
-        """
-        member = BY_NAME.get(name)
-        if member is None:
-            return hasattr(self, name)
-        if hasattr(self._wrapped, member.name):
-            return True
-        if member.fallback and all(self.supports(p) for p in member.needs):
-            return True
-        return False
+    __slots__ = ()
 
     # -- pure-path properties ----------------------------------------------
     @property
@@ -290,7 +274,7 @@ class Path(BaseWrapper):
         )
 
     # -- removal -----------------------------------------------------------
-    def unlink(self, missing_ok: bool = False) -> None:
+    def unlink(self, *, missing_ok: bool = False) -> None:
         """Remove the file at the path."""
         return engine.invoke(
             self, BY_NAME["unlink"], (), {"missing_ok": missing_ok}

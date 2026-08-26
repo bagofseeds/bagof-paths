@@ -44,3 +44,48 @@ def test_with_wrapped_directly() -> None:
     assert type(q) is ReadOnlyPath
     assert q.read_only is True
     assert str(q) == "/store/x"
+
+
+class SlottedPath(Path):
+    """A subclass that keeps its state in slots, not __dict__."""
+
+    __slots__ = ("flag",)
+
+    def __init__(self, path: object, *, flag: object = None, **kwargs) -> None:
+        super().__init__(path, **kwargs)
+        self.flag = flag
+
+
+def test_slotted_subclass_state_carried() -> None:
+    p = SlottedPath("/store/a/b", flag="x")
+    assert p.parent.flag == "x"
+    assert (p / "c").flag == "x"
+    assert p.parents[0].flag == "x"
+
+
+def test_reassignment_on_derived_path_is_independent() -> None:
+    p = ReadOnlyPath("/store/a/b", read_only=True)
+    child = p.parent
+    child.read_only = False
+    assert p.read_only is True  # copy is independent for reassignment
+
+
+class TaggedPath(Path):
+    def __init__(self, path: object, *, tags: object = None, **kwargs) -> None:
+        super().__init__(path, **kwargs)
+        self.tags = [] if tags is None else tags
+
+
+def test_mutable_state_is_shared_shallow() -> None:
+    # Documented behavior: with_wrapped is a shallow copy, so a mutable
+    # attribute is shared across derived paths (like dataclasses.replace).
+    p = TaggedPath("/store/a/b", tags=["t"])
+    p.parent.tags.append("u")
+    assert p.tags == ["t", "u"]
+
+
+def test_plain_path_rejects_stray_attributes() -> None:
+    import pytest
+
+    with pytest.raises(AttributeError):
+        Path("/a").sneaky = 1  # slots hold: no __dict__ on a plain Path

@@ -13,6 +13,8 @@ The engine looks a fallback up by name (the ``fallback`` field of a spec
 
 from __future__ import annotations
 
+import io
+
 import typing_extensions as tx
 
 
@@ -30,11 +32,17 @@ def read_text(
 ) -> str:
     """``read_text`` from ``read_bytes``.
 
-    Newline translation is not applied; a driver that needs it should
-    implement ``read_text`` itself.
+    Decoding goes through the same text layer ``open()`` uses, so newline
+    translation and the encoding defaults match a native ``read_text``.
     """
-    data = wrapper.read_bytes()
-    return data.decode(encoding or "utf-8", errors or "strict")
+    stream = io.TextIOWrapper(
+        io.BytesIO(wrapper.read_bytes()),
+        encoding=encoding, errors=errors, newline=newline,
+    )
+    try:
+        return stream.read()
+    finally:
+        stream.detach()
 
 
 def write_bytes(wrapper: tx.Any, data: tx.Any) -> int:
@@ -53,15 +61,23 @@ def write_text(
 ) -> int:
     """``write_text`` from ``write_bytes``.
 
-    Newline translation is not applied; a driver that needs it should
-    implement ``write_text`` itself.
+    Encoding goes through the same text layer ``open()`` uses, so newline
+    translation matches a native ``write_text``. Returns the number of
+    characters written.
     """
     if not isinstance(data, str):
         raise TypeError(
             f"write_text() argument must be str, not {type(data).__name__}"
         )
-    encoded = data.encode(encoding or "utf-8", errors or "strict")
-    return wrapper.write_bytes(encoded)
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(
+        buffer, encoding=encoding, errors=errors, newline=newline
+    )
+    count = stream.write(data)
+    stream.flush()
+    wrapper.write_bytes(buffer.getvalue())
+    stream.detach()
+    return count
 
 
 def with_stem(wrapper: tx.Any, stem: str) -> tx.Any:

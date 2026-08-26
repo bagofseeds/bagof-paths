@@ -16,6 +16,8 @@ from ._errors import UnsupportedPathOperation
 from ._fallbacks import FALLBACKS
 from ._spec import Member
 
+_MISSING = object()
+
 
 def _unwrap(value: tx.Any) -> tx.Any:
     """A wrapper passed as an argument is delegated as its wrapped path."""
@@ -32,8 +34,10 @@ def _drop_defaults(
     defaults = dict(normalize)
     out = {}
     for key, value in kwargs.items():
-        if key in defaults and value == defaults[key]:
-            continue
+        if key in defaults:
+            default = defaults[key]
+            if value is default or value == default:
+                continue
         out[key] = value
     return out
 
@@ -53,10 +57,10 @@ def _finish(wrapper: BaseWrapper, result: tx.Any, policy: str) -> tx.Any:
 
 def get(wrapper: BaseWrapper, member: Member) -> tx.Any:
     """Resolve a delegated *property* member."""
-    wrapped = wrapper._wrapped
-    if hasattr(wrapped, member.name):
-        return _finish(wrapper, getattr(wrapped, member.name), member.result)
-    raise UnsupportedPathOperation(member.name, driver=wrapped)
+    value = getattr(wrapper._wrapped, member.name, _MISSING)
+    if value is not _MISSING:
+        return _finish(wrapper, value, member.result)
+    raise UnsupportedPathOperation(member.name, driver=wrapper._wrapped)
 
 
 def invoke(

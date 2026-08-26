@@ -1,5 +1,6 @@
 """Synthesized fallbacks: read/write built from a driver that has only open."""
 
+import io
 import os
 import pathlib
 
@@ -106,3 +107,77 @@ def test_is_relative_to_synthesized_from_relative_to() -> None:
     assert p.supports("is_relative_to") is True
     assert p.is_relative_to("/a") is True
     assert p.is_relative_to("/x") is False
+
+
+def test_read_text_fallback_matches_native_on_crlf(
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "n.txt").write_bytes(b"a\r\nb\rc\nd")
+    native = Path(tmp_path / "n.txt").read_text()
+    fallback = Path(OnlyOpen(tmp_path / "n.txt")).read_text()
+    # universal-newline translation applied identically -> same result
+    assert fallback == native == "a\nb\nc\nd"
+
+
+def test_write_text_fallback_matches_native(tmp_path: pathlib.Path) -> None:
+    text = "x\ny\nz"
+    Path(tmp_path / "native.txt").write_text(text)
+    Path(OnlyOpen(tmp_path / "fb.txt")).write_text(text)
+    assert (tmp_path / "fb.txt").read_bytes() == (
+        tmp_path / "native.txt"
+    ).read_bytes()
+
+
+class SpyOpen(os.PathLike):
+    """Records the kwargs open() is actually called with."""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def __fspath__(self) -> str:
+        return "/x"
+
+    def __str__(self) -> str:
+        return "/x"
+
+    def open(self, mode: str = "r", **kwargs: object) -> object:
+        self.calls.append((mode, dict(kwargs)))
+        return io.BytesIO(b"")
+
+
+def test_default_kwargs_are_not_forwarded() -> None:
+    spy = SpyOpen()
+    Path(spy).open("rb")
+    # buffering/encoding/errors/newline are all at their defaults -> dropped
+    assert spy.calls == [("rb", {})]
+
+
+class NarrowMkdir(os.PathLike):
+    """A driver whose mkdir has no mode parameter (cloudpathlib-shaped)."""
+
+    def __init__(self, real: pathlib.Path) -> None:
+        self._real = pathlib.Path(real)
+
+    def __fspath__(self) -> str:
+        return os.fspath(self._real)
+
+    def __str__(self) -> str:
+        return str(self._real)
+
+    def mkdir(self, parents: bool = False, exist_ok: bool = False) -> None:
+        self._real.mkdir(parents=parents, exist_ok=exist_ok)
+
+
+def test_mkdir_default_mode_not_forwarded(tmp_path: pathlib.Path) -> None:
+    d = tmp_path / "sub"
+    Path(NarrowMkdir(d)).mkdir()  # default mode dropped -> no TypeError
+    assert d.is_dir()
+
+
+def test_every_fallback_name_is_registered() -> None:
+    from bagof.paths._fallbacks import FALLBACKS
+    from bagof.paths._spec import MEMBERS
+
+    for member in MEMBERS:
+        if member.fallback is not None:
+            assert member.fallback in FALLBACKS, member.name

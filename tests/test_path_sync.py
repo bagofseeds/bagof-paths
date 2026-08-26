@@ -94,14 +94,46 @@ def test_supports() -> None:
     assert p.supports("joinpath") is True
     # base location members resolve as attributes
     assert p.supports("protocol") is True
-    # full_match has no delegate on this interpreter's pathlib pre-3.13 and
-    # no wired fallback yet -> unsupported
-    import sys
+    # underscore / internal names are not "supported" operations
+    assert p.supports("_key") is False
+    assert p.supports("__init__") is False
 
-    if sys.version_info < (3, 13):
-        assert p.supports("full_match") is False
-        with pytest.raises(UnsupportedPathOperation):
-            p.full_match("*")
+
+def test_full_match_unsupported_without_delegate() -> None:
+    # A driver lacking full_match, with no fallback wired yet -> unsupported,
+    # on every interpreter (not just pre-3.13 pathlib).
+    p = Path(_NoFullMatch())
+    assert p.supports("full_match") is False
+    with pytest.raises(UnsupportedPathOperation):
+        p.full_match("*")
+
+
+def test_url_string_needs_a_driver() -> None:
+    with pytest.raises(ValueError):
+        Path("s3://bucket/key")
+
+
+def test_driver_kwarg_not_yet_supported() -> None:
+    with pytest.raises(NotImplementedError):
+        Path("/a", driver="upath")
+
+
+def test_wrap_pathlike_without_fspath() -> None:
+    # A non-local UPath has no __fspath__; the constructor must still accept
+    # it (gate on path-shaped, not on __fspath__).
+    p = Path(_PartsOnly("/a/b"))
+    assert str(p) == "/a/b"
+
+
+def test_fspath_raises_for_scheme_string_without_protocol_attr() -> None:
+    # The trap: a driver with a scheme-ful str and NO .protocol attribute
+    # must be classified non-local (parsed from the string) so os.fspath
+    # raises rather than silently delegating (which, for a cloud driver,
+    # would download the file).
+    p = Path(_SchemeStr("s3://bucket/key"))
+    assert p.protocol == "s3"
+    with pytest.raises(UnsupportedPathOperation):
+        os.fspath(p)
 
 
 class _FakeCloud(os.PathLike):
@@ -117,3 +149,40 @@ class _FakeCloud(os.PathLike):
 
     def __str__(self) -> str:
         return "s3://" + self._key
+
+
+class _SchemeStr(os.PathLike):
+    """A driver with a scheme-ful str and NO protocol attribute."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __fspath__(self) -> str:  # would "work" if wrongly treated as local
+        return self._text
+
+    def __str__(self) -> str:
+        return self._text
+
+
+class _PartsOnly:
+    """A path-shaped object with no __fspath__ (like a non-local UPath)."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
+
+    @property
+    def parts(self) -> tuple:
+        return tuple(self._text.strip("/").split("/"))
+
+
+class _NoFullMatch(os.PathLike):
+    """A driver that does not implement full_match."""
+
+    def __fspath__(self) -> str:
+        return "/a/b"
+
+    def __str__(self) -> str:
+        return "/a/b"

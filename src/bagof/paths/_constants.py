@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
+# Matches a leading URL scheme, e.g. the "s3" of "s3://bucket/key". Used to
+# recover the protocol and the scheme-less path from a driver whose str() is
+# a URL but which exposes no protocol/path attribute.
+SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)://")
+
 # -- member kinds -----------------------------------------------------------
 # A pure member is lexical: it never touches a filesystem and is never async.
 # An io member may reach a filesystem and gets an async counterpart.

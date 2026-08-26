@@ -82,18 +82,25 @@ IO_MEMBERS = (
     Member("stat", IO, normalize=(("follow_symlinks", True),)),
     Member("lstat", IO),
     Member("samefile", IO),
-    # the read/write primitive
-    Member("open", IO),
+    # the read/write primitive; buffering/encoding/errors/newline forwarded
+    # only when set, so a driver whose open() takes just a mode still works.
+    Member(
+        "open", IO,
+        normalize=(
+            ("buffering", -1), ("encoding", None),
+            ("errors", None), ("newline", None),
+        ),
+    ),
     # read/write: delegate, else synthesize from open / read_bytes
     Member("read_bytes", IO, fallback="read_bytes", needs=("open",)),
     Member(
         "read_text", IO, fallback="read_text", needs=("read_bytes",),
-        normalize=(("newline", None),),
+        normalize=(("encoding", None), ("errors", None), ("newline", None)),
     ),
     Member("write_bytes", IO, fallback="write_bytes", needs=("open",)),
     Member(
         "write_text", IO, fallback="write_text", needs=("write_bytes",),
-        normalize=(("newline", None),),
+        normalize=(("encoding", None), ("errors", None), ("newline", None)),
     ),
     # directory iteration
     Member("iterdir", IO, result=PATH_ITER),
@@ -106,8 +113,11 @@ IO_MEMBERS = (
         normalize=(("case_sensitive", None), ("recurse_symlinks", False)),
     ),
     # creation (return None, like pathlib -- no fluent self)
-    Member("mkdir", IO),
-    Member("touch", IO),
+    Member(
+        "mkdir", IO,
+        normalize=(("mode", 0o777), ("parents", False), ("exist_ok", False)),
+    ),
+    Member("touch", IO, normalize=(("mode", 0o666), ("exist_ok", True))),
     # removal
     Member("unlink", IO, normalize=(("missing_ok", False),)),
     # resolving / expanding (return a path)
