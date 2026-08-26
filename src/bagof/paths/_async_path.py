@@ -16,14 +16,72 @@ would be called through the sync view and return un-awaited coroutines.
 
 from __future__ import annotations
 
+import inspect
 import os
 
 import typing_extensions as tx
 
 from . import _bridge as bridge
 from ._base import BaseWrapper
+from ._errors import UnsupportedPathOperation
 from ._path import Path
 from ._purepath import PurePathMixin
+
+_WALK_DONE = object()
+
+
+def _is_async_driver(wrapped: tx.Any) -> bool:
+    """Whether a wrapped object's members are coroutines (unsupported)."""
+    for name in ("exists", "open", "iterdir", "stat"):
+        member = getattr(wrapped, name, None)
+        if member is not None and (
+            inspect.iscoroutinefunction(member)
+            or inspect.isasyncgenfunction(member)
+        ):
+            return True
+    return False
+
+
+class AsyncFile:
+    """An async view over a synchronous file object.
+
+    Each operation is one thread hop, so reads and writes on a blocking
+    driver handle never stall the event loop. Use it as an async context
+    manager and iterate it with ``async for``.
+    """
+
+    def __init__(self, handle: tx.IO[tx.Any]) -> None:
+        self._handle = handle
+
+    async def read(self, *args: tx.Any) -> tx.Any:
+        return await bridge.run(self._handle.read, *args)
+
+    async def readline(self, *args: tx.Any) -> tx.Any:
+        return await bridge.run(self._handle.readline, *args)
+
+    async def write(self, data: tx.Any) -> int:
+        return await bridge.run(self._handle.write, data)
+
+    async def flush(self) -> None:
+        await bridge.run(self._handle.flush)
+
+    async def close(self) -> None:
+        await bridge.run(self._handle.close)
+
+    async def __aenter__(self) -> AsyncFile:
+        return self
+
+    async def __aexit__(self, *exc: tx.Any) -> None:
+        await self.close()
+
+    def __aiter__(self) -> AsyncFile:
+        return self
+
+    async def __anext__(self) -> tx.Any:
+        line = await bridge.run(self._handle.readline)
+        if not line:
+            raise StopAsyncIteration
+        return line
 
 
 class AsyncPath(PurePathMixin, BaseWrapper):
@@ -40,11 +98,27 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     __slots__ = ()
 
     _family: tx.ClassVar[str] = "async"
+    # An AsyncPath subclass that customizes behavior sets this to its paired
+    # sync Path subclass, so those overrides are honored inside the worker
+    # thread where the synchronous implementation actually runs.
+    _sync_type: tx.ClassVar[tx.Type[Path]] = Path
+
+    def __init__(self, path: tx.Any, *, driver: tx.Any = None) -> None:
+        super().__init__(path, driver=driver)
+        if _is_async_driver(self._wrapped):
+            raise UnsupportedPathOperation(
+                "AsyncPath over an async driver",
+                driver=self._wrapped,
+                hint=(
+                    "this driver is natively asynchronous, which AsyncPath "
+                    "does not yet support; wrap a synchronous driver"
+                ),
+            )
 
     # -- bridge plumbing ---------------------------------------------------
     def _sync(self) -> Path:
         """A synchronous view over the same wrapped driver."""
-        return Path(self._wrapped)
+        return self._sync_type(self._wrapped)
 
     def _wrap(self, result: tx.Any) -> tx.Any:
         """Re-wrap a sync path result as an async one of this path's type."""
@@ -97,13 +171,18 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         encoding: tx.Optional[str] = None,
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
-    ) -> tx.IO[tx.Any]:
-        """Open the path and return a file object (opened in a thread)."""
-        return await bridge.run(
+    ) -> AsyncFile:
+        """Open the path and return an async file object.
+
+        The handle's own reads and writes are each a thread hop, so they do
+        not block the event loop. Use it with ``async with`` / ``async for``.
+        """
+        handle = await bridge.run(
             self._sync().open, mode,
             buffering=buffering, encoding=encoding,
             errors=errors, newline=newline,
         )
+        return AsyncFile(handle)
 
     async def read_bytes(self) -> bytes:
         """Read the whole file as bytes."""
@@ -259,12 +338,18 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         on_error: tx.Optional[tx.Callable] = None,
         follow_symlinks: bool = False,
     ) -> tx.AsyncIterator[tx.Tuple[tx.Self, tx.List[str], tx.List[str]]]:
-        """Walk the tree, yielding ``(path, dirnames, filenames)`` per dir."""
-        sync = self._sync()
-        rows = await bridge.run(
-            lambda: list(sync.walk(top_down, on_error, follow_symlinks))
-        )
-        for dirpath, dirnames, filenames in rows:
+        """Walk the tree, yielding ``(path, dirnames, filenames)`` per dir.
+
+        One directory per thread hop, so mutating ``dirnames`` in place to
+        prune the descent works exactly as it does on the sync wrapper. Note
+        that ``on_error`` runs in a worker thread.
+        """
+        rows = self._sync().walk(top_down, on_error, follow_symlinks)
+        while True:
+            row = await bridge.run(next, rows, _WALK_DONE)
+            if row is _WALK_DONE:
+                return
+            dirpath, dirnames, filenames = row
             yield self._wrap(dirpath), dirnames, filenames
 
     # -- resolving and expanding -------------------------------------------
