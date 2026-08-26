@@ -13,6 +13,7 @@ import typing_extensions as tx
 from ._base import BaseWrapper
 from ._constants import PATH, PATH_ITER, PATH_TUPLE, SCALAR
 from ._errors import UnsupportedPathOperation
+from ._fallbacks import FALLBACKS
 from ._spec import Member
 
 
@@ -70,5 +71,12 @@ def invoke(
     method = getattr(wrapper._wrapped, member.name, None)
     if callable(method):
         return _finish(wrapper, method(*args, **kwargs), member.result)
-    # A synthesized fallback is wired in for io members in a later phase.
+    if member.fallback and _has_needs(wrapper, member):
+        synth = FALLBACKS[member.fallback]
+        return _finish(wrapper, synth(wrapper, *args, **kwargs), member.result)
     raise UnsupportedPathOperation(member.name, driver=wrapper._wrapped)
+
+
+def _has_needs(wrapper: BaseWrapper, member: Member) -> bool:
+    """Whether every primitive a fallback depends on is itself available."""
+    return all(wrapper.supports(name) for name in member.needs)

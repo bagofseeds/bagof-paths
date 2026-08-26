@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import typing_extensions as tx
 
-from ._constants import PATH, PATH_TUPLE, PURE, SCALAR
+from ._constants import IO, PATH, PATH_ITER, PATH_TUPLE, PURE, SCALAR
 
 
 class Member(tx.NamedTuple):
@@ -63,4 +63,55 @@ PURE_PATH_MEMBERS = (
     Member("full_match", normalize=(("case_sensitive", None),)),
 )
 
-BY_NAME = {member.name: member for member in PURE_PATH_MEMBERS}
+# The concrete surface: members that reach a filesystem. Copy/move, recursive
+# rmdir, walk, and the classmethods (home/cwd) arrive with the driver adapter
+# layer, where their cross-driver divergence is handled in one place.
+IO_MEMBERS = (
+    # status queries -- follow_symlinks is forwarded only when False, so a
+    # driver whose signature predates the keyword still works by default.
+    Member("exists", IO, normalize=(("follow_symlinks", True),)),
+    Member("is_file", IO, normalize=(("follow_symlinks", True),)),
+    Member("is_dir", IO, normalize=(("follow_symlinks", True),)),
+    Member("is_symlink", IO),
+    Member("stat", IO, normalize=(("follow_symlinks", True),)),
+    Member("lstat", IO),
+    Member("samefile", IO),
+    # the read/write primitive
+    Member("open", IO),
+    # read/write: delegate, else synthesize from open / read_bytes
+    Member("read_bytes", IO, fallback="read_bytes", needs=("open",)),
+    Member(
+        "read_text", IO, fallback="read_text", needs=("read_bytes",),
+        normalize=(("newline", None),),
+    ),
+    Member("write_bytes", IO, fallback="write_bytes", needs=("open",)),
+    Member(
+        "write_text", IO, fallback="write_text", needs=("write_bytes",),
+        normalize=(("newline", None),),
+    ),
+    # directory iteration
+    Member("iterdir", IO, result=PATH_ITER),
+    Member(
+        "glob", IO, result=PATH_ITER,
+        normalize=(("case_sensitive", None), ("recurse_symlinks", False)),
+    ),
+    Member(
+        "rglob", IO, result=PATH_ITER,
+        normalize=(("case_sensitive", None), ("recurse_symlinks", False)),
+    ),
+    # creation (return None, like pathlib -- no fluent self)
+    Member("mkdir", IO),
+    Member("touch", IO),
+    # removal
+    Member("unlink", IO, normalize=(("missing_ok", False),)),
+    # resolving / expanding (return a path)
+    Member("resolve", IO, result=PATH, normalize=(("strict", False),)),
+    Member("absolute", IO, result=PATH),
+    Member("expanduser", IO, result=PATH),
+    Member("readlink", IO, result=PATH),
+    Member("rename", IO, result=PATH),
+    Member("replace", IO, result=PATH),
+)
+
+MEMBERS = PURE_PATH_MEMBERS + IO_MEMBERS
+BY_NAME = {member.name: member for member in MEMBERS}
