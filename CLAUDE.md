@@ -135,11 +135,19 @@ optional preferred driver in one call; register protocols **at import time**,
 since traits feed a path's canonical identity.
 
 **Credentials ride on `storage_options`.** `Path(url, storage_options={...})`
-forwards a connection dict to the chosen factory; `register_protocol(scheme,
-storage_options={...})` sets per-scheme defaults, and a per-call dict overrides
-them key by key (shallow merge in `_select.build`). The factory contract is
-`driver(text, **options)`, called with the URL alone when there are no options
-(so a historical `str -> path` driver still works). `storage_options` is valid
+forwards a connection dict to the chosen factory. Per-scheme defaults are set
+with `set_storage_options(scheme, {...})`, which keeps the scheme's other
+traits; `register_protocol` **replaces a scheme wholesale**, so it is for
+*defining* a scheme, not for adding options to a built-in one (doing that
+would drop `bucketed`/`absolute` and detach aliases). A per-call dict
+overrides the per-scheme default key by key; the merge lives in
+`_protocols.merged_storage_options`, used by both `_select.build` and the
+explicit-`driver=` path in `_build_from_string` (so an explicit driver still
+gets the scheme's defaults). The factory contract is `driver(text,
+**options)`, called with the URL alone when there are no options (so a
+historical `str -> path` driver still works). A per-scheme default keys on the
+leading scheme, so an fsspec **chain** URL (`simplecache::s3://...`, whose
+identity scheme is empty) carries per-call options only. `storage_options` is valid
 only for a remote URL: a local path, a local scheme, or a pre-built driver
 object with options is a `TypeError`. cloudpathlib takes a `Client`, not an
 options dict, so options + only cloudpathlib available is a `TypeError`

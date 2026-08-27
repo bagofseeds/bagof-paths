@@ -37,7 +37,7 @@ from ._constants import (
 )
 from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
-from ._protocols import canonical_scheme, traits_for
+from ._protocols import canonical_scheme, merged_storage_options, traits_for
 from ._spec import BY_NAME
 
 _MISSING = object()
@@ -59,6 +59,21 @@ class BaseWrapper:
         driver: tx.Any = None,
         storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> None:
+        """Wrap a path object, or build one from a path string or URL.
+
+        Parameters
+        ----------
+        path:
+            A path-like object to wrap as it is, or a string. A plain string
+            is a local path; a ``scheme://`` URL selects a driver.
+        driver:
+            For a URL string, a path class or ``str -> path`` factory to use
+            instead of the automatic selection. Not valid for a path object.
+        storage_options:
+            For a URL string, connection options (endpoint, credentials, ...)
+            forwarded to the driver, over any per-scheme defaults. Not valid
+            for a local path or a path object.
+        """
         if isinstance(path, str):
             path = _build_from_string(path, driver, storage_options)
         else:
@@ -67,7 +82,7 @@ class BaseWrapper:
                     "driver= applies only to a URL string; a path object is "
                     "wrapped as it is (its own type is already its driver)"
                 )
-            if storage_options is not None:
+            if storage_options:
                 raise TypeError(
                     "storage_options= applies only to a URL string; a path "
                     "object already carries its own connection"
@@ -81,11 +96,12 @@ class BaseWrapper:
                 )
         if self._family == "sync" and is_async_driver(path):
             # A synchronous method over an async driver returns un-awaited
-            # coroutines -- a silent trap. Refuse it at construction.
-            raise UnsupportedPathOperation(
-                "wrap",
-                driver=path,
-                hint="this driver is asynchronous; use AsyncPath, not Path",
+            # coroutines -- a silent trap. Refuse it at construction, the same
+            # way the other unusable-argument cases above are refused.
+            name = getattr(path, "__name__", None) or type(path).__name__
+            raise TypeError(
+                f"{name} is an asynchronous driver; wrap it with AsyncPath, "
+                "not Path"
             )
         self._wrapped = path
 
@@ -410,11 +426,14 @@ def _build_from_string(
     driver. They apply only to a remote URL: a local path has nowhere to send
     them, and passing them for one is a ``TypeError``.
     """
-    if driver is not None:
-        if storage_options:
-            return driver(text, **storage_options)
-        return driver(text)
     match = SCHEME_RE.match(text)
+    scheme = match.group(1).lower() if match is not None else ""
+    if driver is not None:
+        # An explicit driver still gets the scheme's default connection
+        # options (with any per-call override on top): the credentials belong
+        # to the store, not to whichever factory builds the path.
+        options = merged_storage_options(scheme, storage_options)
+        return driver(text, **options) if options else driver(text)
     if match is None:
         if "::" in text and "://" in text:
             # An fsspec chain (simplecache::s3://...) with no leading
@@ -423,7 +442,6 @@ def _build_from_string(
             return _select.build(text, "", storage_options)
         _reject_local_storage_options(storage_options, text)
         return LocalPath(text)
-    scheme = match.group(1).lower()
     if scheme in LOCAL_PROTOCOLS:
         _reject_local_storage_options(storage_options, text)
         return _local_from_url(text, scheme)

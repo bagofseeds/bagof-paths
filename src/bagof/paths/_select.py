@@ -45,13 +45,10 @@ def build(
     chosen driver. A per-scheme default registered with the protocol is the
     base; the per-call mapping overrides it key by key.
     """
-    from ._protocols import traits_for
+    from ._protocols import merged_storage_options, traits_for
 
-    traits = traits_for(scheme) if scheme else None
-    options = dict(traits.storage_options) if traits is not None else {}
-    options.update(storage_options or {})
-
-    preferred = traits.driver if traits is not None else None
+    options = merged_storage_options(scheme, storage_options)
+    preferred = traits_for(scheme).driver if scheme else None
     if preferred is not None:
         # An explicit registration: its own errors are meaningful, not masked.
         return _call_factory(preferred, text, options)

@@ -9,7 +9,11 @@ from ._async_path import AsyncPath
 from ._drivers import register_driver
 from ._errors import NoDriverError, UnsupportedPathOperation
 from ._path import Path
-from ._protocols import ProtocolTraits, register_protocol
+from ._protocols import (
+    ProtocolTraits,
+    register_protocol,
+    set_storage_options,
+)
 
 __all__ = [
     "AsyncPath",
@@ -19,4 +23,5 @@ __all__ = [
     "UnsupportedPathOperation",
     "register_driver",
     "register_protocol",
+    "set_storage_options",
 ]

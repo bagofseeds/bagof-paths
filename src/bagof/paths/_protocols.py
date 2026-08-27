@@ -62,15 +62,24 @@ class ProtocolTraits:
         self.storage_options = dict(storage_options or {})
 
     def __repr__(self) -> str:
-        # storage_options may hold credentials, so its contents are never
-        # rendered -- only whether any are set. A repr reaches debug logs.
+        # Neither storage_options nor the driver is rendered by value: the
+        # first commonly holds credentials, and the second is often a factory
+        # (a functools.partial) with a client or secret bound into it. A repr
+        # reaches debug logs, so both are shown by presence/name only.
         options = "<redacted>" if self.storage_options else "{}"
         return (
             "ProtocolTraits("
             f"bucketed={self.bucketed!r}, absolute={self.absolute!r}, "
-            f"aliases={self.aliases!r}, driver={self.driver!r}, "
+            f"aliases={self.aliases!r}, driver={_driver_name(self.driver)}, "
             f"storage_options={options})"
         )
+
+
+def _driver_name(driver: tx.Any) -> str:
+    """A driver's name for a repr -- never its value (it may hold secrets)."""
+    if driver is None:
+        return "None"
+    return getattr(driver, "__name__", None) or type(driver).__name__
 
 
 _DEFAULT = ProtocolTraits()
@@ -92,9 +101,13 @@ def register_protocol(
 ) -> None:
     """Register (or replace) the traits for a URL ``scheme``.
 
-    A later registration replaces an earlier one for the same scheme
-    wholesale. Registering a scheme that was another scheme's alias detaches
-    it: the explicit registration wins.
+    A later registration **replaces an earlier one wholesale**: any trait not
+    passed reverts to its default, aliases and all. Use this to *define* a
+    scheme, not to tweak one. In particular, re-registering a built-in scheme
+    (``s3``, ``gs``, ``az``) to add ``storage_options`` would drop its
+    ``bucketed``/``absolute`` traits and detach its aliases -- to attach
+    connection options to a scheme that already exists, use
+    :func:`set_storage_options`, which keeps the other traits.
 
     ``storage_options`` gives default connection options (endpoint,
     credentials, ...) forwarded to the driver for every path of this scheme;
@@ -127,6 +140,47 @@ def register_protocol(
         del _ALIASES[alias]
     for alias in new_aliases:
         _ALIASES[alias] = scheme
+
+
+def set_storage_options(
+    scheme: str,
+    storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+) -> None:
+    """Set the default connection options for a URL ``scheme``.
+
+    Unlike :func:`register_protocol`, this keeps the scheme's other traits
+    (``bucketed``, ``aliases``, the preferred driver). It is the way to attach
+    an endpoint or credentials to a scheme that is already understood::
+
+        set_storage_options("s3", {"endpoint_url": "https://minio.local"})
+
+    The options replace this scheme's current defaults; a per-call
+    ``storage_options`` on the constructor still overrides them key by key.
+    Setting them on an alias sets them on the store it names. Call at import
+    time -- see the module note on identity.
+    """
+    canonical = canonical_scheme(scheme)
+    current = _PROTOCOLS.get(canonical, _DEFAULT)
+    _PROTOCOLS[canonical] = ProtocolTraits(
+        bucketed=current.bucketed,
+        absolute=current.absolute,
+        aliases=current.aliases,
+        driver=current.driver,
+        storage_options=storage_options,
+    )
+
+
+def merged_storage_options(
+    scheme: str,
+    storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+) -> tx.Dict[str, tx.Any]:
+    """A scheme's default options with a per-call mapping layered on top.
+
+    The per-call mapping wins key by key; the registry is never mutated.
+    """
+    base = dict(traits_for(scheme).storage_options) if scheme else {}
+    base.update(storage_options or {})
+    return base
 
 
 def canonical_scheme(scheme: str) -> str:

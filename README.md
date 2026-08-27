@@ -81,8 +81,14 @@ Path(
 Leave `storage_options` off to use ambient credentials, such as environment
 variables, `~/.aws/config`, or an instance role.
 
-Set defaults once for a scheme with `register_protocol`, and a per-call
+Set defaults once for a scheme with `set_storage_options`, and a per-call
 `storage_options` overrides them key by key.
+
+```python
+from bagof.paths import set_storage_options
+
+set_storage_options("s3", {"endpoint_url": "https://minio.local"})
+```
 
 ## Async
 
