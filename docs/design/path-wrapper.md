@@ -517,9 +517,26 @@ bagof.paths
     Path                      # the sync wrapper
     AsyncPath                 # the async wrapper
     UnsupportedPathOperation  # the state-3 exception
+    NoDriverError             # construction: no driver builds this scheme
+    ProtocolTraits            # a scheme's traits (introspection)
     register_driver           # adapter registration (advanced, public)
     register_protocol         # protocol traits registration (advanced, public)
 ```
+
+Driver selection is implemented (see §6.2). `Path("s3://bucket/key")` picks a
+backend from the scheme: an explicit `driver=` (a path class or `str -> path`
+callable) wins, then a protocol's registered preference, then the availability
+order **universal-pathlib → cloudpathlib**. universal-pathlib is the automatic
+default — it builds any fsspec URL lazily (no cloud SDK needed to construct)
+and covers the widest scheme set; cloudpathlib is the fallback when it is
+absent, selected as its *concrete* implementation class (never `AnyPath`,
+whose answer for an unrecognised scheme is a silent local path). A scheme no
+installed backend can build raises `NoDriverError` (a `ValueError`) — never a
+silent local path. `register_protocol(scheme, *, bucketed=…, aliases=…,
+driver=…)` carries a scheme's traits and its optional preferred driver in one
+call; `ProtocolTraits` takes keyword arguments only so new traits stay
+backward-compatible. Register protocols at import time — traits participate in
+a path's canonical identity (scheme aliases fold, `s3`≡`s3a`).
 
 Settled naming calls, with reasons:
 
@@ -702,7 +719,17 @@ cannot silently reintroduce them.
    delegated, synthesized, or delegate-or-raise on the same spec/engine path
    as the rest, with the async surface kept in lockstep. Anything left out is
    still reachable through `path.wrapped`.
-7. **Docs + polish.** mkdocstrings pages, `pycon`-tested examples on the
+7. **Driver selection.** `Path("s3://…")` builds a backend from the scheme
+   (§6.2): explicit `driver=` > a protocol's registered preference >
+   universal-pathlib > cloudpathlib's concrete class > `NoDriverError`. The
+   public `register_protocol`/`ProtocolTraits` registry (bucketed, aliases,
+   absolute, preferred driver); scheme aliases fold into the canonical
+   identity; the scheme is lower-cased and fsspec chains
+   (`simplecache::s3://…`) route to selection rather than becoming a local
+   path. The dependency-free fallback driver and a `to()` cross-driver
+   converter stay deferred (the availability tail is an error branch the
+   fallback later appends to — non-breaking).
+8. **Docs + polish.** mkdocstrings pages, `pycon`-tested examples on the
    oldest supported interpreter, a comparison page vs raw
    `pathlib`/`UPath`/`AnyPath`, `CLAUDE.md`.
 

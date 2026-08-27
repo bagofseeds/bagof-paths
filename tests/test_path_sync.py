@@ -111,16 +111,6 @@ def test_full_match_computed_regardless_of_driver() -> None:
     assert p.full_match("**/b") is True
 
 
-def test_url_string_needs_a_driver() -> None:
-    with pytest.raises(ValueError):
-        Path("s3://bucket/key")
-
-
-def test_driver_kwarg_not_yet_supported() -> None:
-    with pytest.raises(NotImplementedError):
-        Path("/a", driver="upath")
-
-
 def test_wrap_pathlike_without_fspath() -> None:
     # A non-local UPath has no __fspath__; the constructor must still accept
     # it (gate on path-shaped, not on __fspath__).

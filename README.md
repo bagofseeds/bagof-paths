@@ -5,8 +5,10 @@ A uniform, `pathlib`-style API over any path-like object — the stdlib
 `UPath`, [`cloudpathlib`](https://github.com/drivendataorg/cloudpathlib)'s
 `AnyPath`, and unknown drivers alike.
 
-`bagof.paths` wraps a path object and exposes one consistent surface on top of
-it. For each member of that surface it either:
+`bagof.paths` wraps a path object — or a URL string like `s3://bucket/key`,
+picking a backend by scheme (universal-pathlib, else cloudpathlib; override
+with `driver=` or `register_protocol`) — and exposes one consistent surface on
+top of it. For each member of that surface it either:
 
 - **delegates** to the wrapped object when it implements it,
 - **falls back** to a synthesized implementation when it does not (for example,

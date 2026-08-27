@@ -27,6 +27,7 @@ from pathlib import Path as LocalPath
 
 import typing_extensions as tx
 
+from . import _select
 from ._constants import (
     ACCESSOR_MEMBERS,
     ADAPTER_MEMBERS,
@@ -35,6 +36,7 @@ from ._constants import (
     SCHEME_RE,
 )
 from ._errors import UnsupportedPathOperation
+from ._protocols import canonical_scheme, traits_for
 from ._spec import BY_NAME
 
 _MISSING = object()
@@ -50,26 +52,21 @@ class BaseWrapper:
     _family: tx.ClassVar[str] = "sync"
 
     def __init__(self, path: tx.Any, *, driver: tx.Any = None) -> None:
-        if driver is not None:
-            raise NotImplementedError(
-                "driver selection lands with the adapter layer; for now wrap "
-                "an already-constructed driver path object"
-            )
-        if isinstance(path, BaseWrapper):
-            path = path._wrapped
-        elif isinstance(path, str):
-            if SCHEME_RE.match(path):
-                raise ValueError(
-                    f"a URL string like {path!r} needs a driver to "
-                    "interpret its scheme; wrap a driver path object "
-                    "(e.g. UPath/AnyPath), or wait for driver selection"
+        if isinstance(path, str):
+            path = _build_from_string(path, driver)
+        else:
+            if driver is not None:
+                raise TypeError(
+                    "driver= applies only to a URL string; a path object is "
+                    "wrapped as it is (its own type is already its driver)"
                 )
-            path = LocalPath(path)
-        elif not _is_path_shaped(path):
-            raise TypeError(
-                f"cannot wrap {type(path).__name__!r}; expected a path "
-                "string or a path-like object"
-            )
+            if isinstance(path, BaseWrapper):
+                path = path._wrapped
+            elif not _is_path_shaped(path):
+                raise TypeError(
+                    f"cannot wrap {type(path).__name__!r}; expected a path "
+                    "string or a path-like object"
+                )
         self._wrapped = path
 
     # -- local-filesystem constructors -------------------------------------
@@ -89,11 +86,20 @@ class BaseWrapper:
 
     @classmethod
     def from_uri(cls, uri: str) -> tx.Self:
-        """A path from a ``file://`` URI (local filesystem).
+        """A path from a URI.
 
-        A URI naming another scheme (``s3://``, ``memory://``, ...) needs a
-        driver to interpret it; wrap a driver path built from the URI instead.
+        A ``file://`` URI becomes a local path; a URI of another scheme is
+        built through the ordinary constructor's driver selection, so
+        ``Path.from_uri("s3://...")`` and ``Path("s3://...")`` agree.
         """
+        match = SCHEME_RE.match(uri)
+        scheme = match.group(1).lower() if match else ""
+        if scheme and scheme not in LOCAL_PROTOCOLS:
+            return cls(uri)
+        # The stdlib is case-sensitive about "file:"; normalise the scheme
+        # (the constructor does the same for a remote URL).
+        if match is not None:
+            uri = scheme + uri[match.end(1):]
         native = getattr(LocalPath, "from_uri", None)
         if native is None:  # pathlib gained from_uri in 3.13
             return cls(_local_from_file_uri(uri))  # pragma: no cover
@@ -135,9 +141,18 @@ class BaseWrapper:
         if name in COMPUTED_MEMBERS:
             return True
         if name in ACCESSOR_MEMBERS:
-            # Answered on the wrapped object: reading the property itself
-            # would raise UnsupportedPathOperation for a driver that lacks it.
-            return hasattr(self._wrapped, name)
+            # Check the driver *class*, not the instance: these accessors are
+            # properties, and some (universal-pathlib's `fs`/`info`) build the
+            # filesystem when read -- which can raise ImportError for a
+            # missing backend SDK. The class carries the descriptor unread.
+            has = hasattr(type(self._wrapped), name)
+            if name == "bucket":
+                # bucket is also derivable from the drive of a bucketed
+                # protocol, even when the driver has no bucket attribute.
+                return has or (
+                    traits_for(self.protocol).bucketed and bool(self.drive)
+                )
+            return has
         # Location properties (protocol, path, drive, ...) resolve directly.
         return not name.startswith("_") and hasattr(self, name)
 
@@ -184,7 +199,9 @@ class BaseWrapper:
             return target._wrapped
         if isinstance(target, str):
             match = SCHEME_RE.match(target)
-            if match and match.group(1) != self.protocol:
+            if match and canonical_scheme(match.group(1)) != canonical_scheme(
+                self.protocol
+            ):
                 raise ValueError(
                     f"a target like {target!r} names a different scheme; "
                     "pass a wrapped path instead of a string"
@@ -256,8 +273,25 @@ class BaseWrapper:
 
     @property
     def bucket(self) -> tx.Any:
-        """The bucket the path lives in (cloudpathlib)."""
-        return self._delegate_attr("bucket")
+        """The bucket the path lives in.
+
+        Delegated to the driver where it has one (cloudpathlib), else derived
+        from the drive of a bucketed protocol (``s3``, ``gs``, ``az``, ...);
+        a non-bucketed protocol (local, memory) has no bucket and raises.
+        """
+        value = getattr(self._wrapped, "bucket", _MISSING)
+        if value is not _MISSING:
+            return value
+        if traits_for(self.protocol).bucketed:
+            drive = self.drive
+            if drive:
+                return drive
+            hint = "this path names no bucket (it is the bucketed root)"
+        else:
+            hint = "only a bucketed protocol (s3, gs, az, ...) has a bucket"
+        raise UnsupportedPathOperation(
+            "bucket", driver=self._wrapped, hint=hint
+        )
 
     @property
     def key(self) -> tx.Any:
@@ -293,6 +327,10 @@ class BaseWrapper:
         protocol = self.protocol
         if protocol in LOCAL_PROTOCOLS:
             protocol = ""
+        else:
+            # Fold scheme aliases (s3/s3a, gs/gcs) to their canonical name, so
+            # two spellings of the same store compare and hash equal.
+            protocol = canonical_scheme(protocol)
         return (protocol, self.path)
 
     def __eq__(self, other: tx.Any) -> bool:
@@ -332,6 +370,46 @@ class BaseWrapper:
         return self.with_wrapped(other / self._wrapped)
 
 
+def _build_from_string(text: str, driver: tx.Any) -> tx.Any:
+    """Turn a string into a driver path: local, selected, or via ``driver=``.
+
+    An explicit ``driver`` (a path class or ``str -> path`` callable) wins. A
+    plain path or a ``file://``/``local://`` URI becomes a stdlib
+    ``pathlib.Path``. A remote scheme, or an fsspec chain like
+    ``simplecache::s3://...``, is handed to driver selection.
+    """
+    if driver is not None:
+        return driver(text)
+    match = SCHEME_RE.match(text)
+    if match is None:
+        if "::" in text and "://" in text:
+            # An fsspec chain (simplecache::s3://...) with no leading
+            # scheme://. The inner "://" is what marks it a URL, so a plain
+            # local filename that merely contains "::" stays a local path.
+            return _select.build(text, "")
+        return LocalPath(text)
+    scheme = match.group(1).lower()
+    if scheme in LOCAL_PROTOCOLS:
+        return _local_from_url(text, scheme)
+    # URL schemes are case-insensitive (RFC 3986) but a backend may reject a
+    # mixed-case one; lower-case only the scheme, leaving the (possibly
+    # case-sensitive) remainder of the URL untouched.
+    text = scheme + text[match.end(1):]
+    return _select.build(text, scheme)
+
+
+def _local_from_url(text: str, scheme: str) -> LocalPath:
+    """A local path from a ``file://`` / ``local://`` URL, on any version."""
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname
+
+    parsed = urlparse(text)
+    if scheme == "file":
+        return LocalPath(url2pathname(parsed.path))
+    # local://<netloc><path> -- keep whatever follows the scheme as the path.
+    return LocalPath(url2pathname(parsed.netloc + parsed.path) or ".")
+
+
 def _local_from_file_uri(uri: str) -> LocalPath:  # pragma: no cover
     """Build a local path from a ``file://`` URI on pathlib < 3.13.
 
@@ -343,7 +421,7 @@ def _local_from_file_uri(uri: str) -> LocalPath:  # pragma: no cover
     from urllib.request import url2pathname
 
     match = SCHEME_RE.match(uri)
-    scheme = match.group(1) if match else ""
+    scheme = match.group(1).lower() if match else ""
     if scheme != "file":
         raise ValueError(
             f"cannot build a local path from {uri!r}; a URL scheme like "
