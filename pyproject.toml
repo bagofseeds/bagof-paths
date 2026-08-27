@@ -1,16 +1,15 @@
 [project]
-name = "bagof-things"
-# Replace these template contacts before publishing.
+name = "bagof-paths"
 authors = [
-    {name = "Your Name", email = "your.email@example.com"},
+    {name = "Yael Balbastre", email = "yael.balbastre@gmail.com"},
 ]
 maintainers = [
-    {name = "Your Name", email = "your.email@example.com"},
+    {name = "Yael Balbastre", email = "yael.balbastre@gmail.com"},
 ]
-description = "Template package for bagof.things"
+description = "A uniform pathlib-style API over pathlib, UPath, and cloud paths."
 readme = "README.md"
 license = {text = "MIT"}
-keywords = ["bagof", "template", "python"]
+keywords = ["bagof", "paths", "pathlib", "upath", "fsspec", "cloudpathlib", "python"]
 classifiers = [
     "Development Status :: 1 - Planning",
     "Intended Audience :: Developers",
@@ -30,12 +29,16 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/bagofseeds/bagof-things"
-Documentation = "https://github.com/bagofseeds/bagof-things#readme"
-Issues = "https://github.com/bagofseeds/bagof-things/issues"
-Repository = "https://github.com/bagofseeds/bagof-things"
+Homepage = "https://github.com/bagofseeds/bagof-paths"
+Documentation = "https://github.com/bagofseeds/bagof-paths#readme"
+Issues = "https://github.com/bagofseeds/bagof-paths/issues"
+Repository = "https://github.com/bagofseeds/bagof-paths"
 
 [project.optional-dependencies]
+# universal-pathlib and cloudpathlib require Python >= 3.9; the core package
+# and its 3.8 CI leg stay dependency-free (they wrap stdlib pathlib).
+upath = ["universal-pathlib"]
+cloud = ["cloudpathlib"]
 test = [
     "pytest>=7",
 ]
@@ -68,7 +71,7 @@ dirty = "{base_version}+{distance}.{vcs}{rev}.dirty"
 distance-dirty = "{base_version}+{distance}.{vcs}{rev}.dirty"
 
 [tool.versioningit.write]
-file = "src/bagof/things/_version.py"
+file = "src/bagof/paths/_version.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

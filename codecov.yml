@@ -1,0 +1,13 @@
+# New code (the patch) must be well covered; overall project coverage is
+# reported but not gated; the test suite itself is excluded from measurement.
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+    patch:
+      default:
+        target: 90%
+        threshold: 0%
+ignore:
+  - "tests/**"
