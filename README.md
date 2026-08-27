@@ -1,39 +1,19 @@
 # bagof-paths
 
-A uniform, `pathlib`-style API over any path-like object — the stdlib
-`pathlib.Path`, [`universal-pathlib`](https://github.com/fsspec/universal_pathlib)'s
-`UPath`, [`cloudpathlib`](https://github.com/drivendataorg/cloudpathlib)'s
-`AnyPath`, and unknown drivers alike.
+**One path API for local files and the cloud.**
 
-`bagof.paths` wraps a path object — or a URL string like `s3://bucket/key`,
-picking a backend by scheme (universal-pathlib, else cloudpathlib; override
-with `driver=` or `register_protocol`) — and exposes one consistent surface on
-top of it. For each member of that surface it either:
+Wrap a path or a URL, then use it like `pathlib.Path`. The same code reads a
+local file, an object on S3, or anything the underlying libraries reach.
 
-- **delegates** to the wrapped object when it implements it,
-- **falls back** to a synthesized implementation when it does not (for example,
-  `read_text` from `read_bytes`, `read_bytes` from `open`, `copy` from
-  `shutil`), or
-- **raises** a single, well-named error when neither is possible.
+```python
+from bagof.paths import Path
 
-A sync wrapper (`Path`) and an async wrapper (`AsyncPath`) share the same
-surface; the async wrapper bridges a blocking driver by running it in a worker
-thread.
-
-## Install
-
-```sh
-pip install bagof-paths          # core: stdlib pathlib, typing_extensions only
-pip install bagof-paths[upath]   # + universal-pathlib (each fsspec backend, e.g. s3fs, adds its own)
-pip install bagof-paths[cloud]   # + cloudpathlib (each cloud, e.g. cloudpathlib[s3], adds its own SDK)
+Path("/data/train.zarr")           # a local file
+Path("s3://my-bucket/train.zarr")  # an object on S3
 ```
 
-The core wraps stdlib `pathlib` with only `typing_extensions` as a
-dependency; `upath` and `cloudpathlib` are optional extras (Python ≥ 3.9).
-
-## Quick start
-
-Wrap a path and use it like `pathlib`:
+Both give you the same methods: `read_bytes`, `exists`, `iterdir`, `/`, and
+the rest of the `pathlib` surface.
 
 ```pycon
 >>> from bagof.paths import Path
@@ -42,12 +22,37 @@ Wrap a path and use it like `pathlib`:
 'train.zarr'
 >>> p.parent
 Path('/data/sets')
->>> (p / "chunks").suffix
-''
+>>> p / "chunks"
+Path('/data/sets/train.zarr/chunks')
 ```
 
-The same code works over a bucket once a backend is installed — the scheme
-selects the driver:
+## Features
+
+* **One API for every path.** Local files, cloud storage, and unknown
+  backends all use the same methods.
+* **Missing methods are filled in.** When a library lacks a method,
+  `bagof.paths` builds it from simpler ones. It reads text from bytes, and
+  copies a folder by copying its files.
+* **One error to catch.** An operation that cannot work raises a single
+  `UnsupportedPathOperation`, the same for every library.
+* **Async support.** `AsyncPath` gives you the same methods with `await`.
+* **No required dependency.** Local paths use only the standard library.
+
+## Installation
+
+```sh
+pip install bagof-paths          # local paths
+pip install bagof-paths[upath]   # add remote paths via universal-pathlib
+pip install bagof-paths[cloud]   # add cloud paths via cloudpathlib
+```
+
+A remote store also needs its own library, such as `s3fs` for `s3://` or
+`cloudpathlib[s3]`.
+
+## The same code, local or remote
+
+`Path` reads the start of the string to choose a backend. A plain path is a
+local file. A URL uses `universal-pathlib`, or `cloudpathlib` if you have it.
 
 ```python
 from bagof.paths import Path
@@ -55,22 +60,14 @@ from bagof.paths import Path
 def load(location: str) -> bytes:
     return Path(location).read_bytes()
 
-load("/data/train.bin")           # local file, via pathlib
-load("s3://my-bucket/train.bin")  # S3 object, via universal-pathlib
+load("/data/train.bin")
+load("s3://my-bucket/train.bin")
 ```
 
-An unsupported operation is one named error, so a caller can handle it
-uniformly:
+## Async
 
-```pycon
->>> from bagof.paths import UnsupportedPathOperation
->>> issubclass(UnsupportedPathOperation, NotImplementedError)
-True
-```
-
-`AsyncPath` mirrors the I/O surface with coroutines (lexical members like
-`name` and `parent` stay synchronous), running a blocking driver in a worker
-thread:
+`AsyncPath` turns the methods that touch storage into coroutines. The methods
+that only describe a path (`name`, `parent`, `/`) stay synchronous.
 
 ```python
 import asyncio
@@ -84,11 +81,6 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The architecture and the reconciled cross-driver behaviour are written up in
-[`docs/design/path-wrapper.md`](docs/design/path-wrapper.md); see
-[the comparison page](docs/comparison.md) for how it relates to raw
-`pathlib`/`UPath`/`AnyPath`.
+## Learn more
 
-The workflow wrappers intentionally track `bagofseeds/actions@main` so the
-repository inherits shared CI updates without manually refreshing pinned
-workflow SHAs.
+See [how it compares](docs/comparison.md) to `pathlib`, `UPath`, and `AnyPath`.

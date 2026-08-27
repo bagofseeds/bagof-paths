@@ -14,9 +14,9 @@ from ._spec import BY_NAME
 
 
 class Path(PurePathMixin, BaseWrapper):
-    """A path-like object exposed through one uniform, pathlib-style surface.
+    """A path that works like ``pathlib.Path``, local or in the cloud.
 
-    Construct one around a path string or any path-like object:
+    Make one from a path string, a URL, or any path object:
 
     ```pycon
     >>> from bagof.paths import Path
@@ -29,8 +29,9 @@ class Path(PurePathMixin, BaseWrapper):
     ''
     ```
 
-    Each member either delegates to the wrapped object, falls back to a
-    synthesized implementation, or raises `UnsupportedPathOperation`.
+    Each method uses the underlying library when it can, builds the method
+    from simpler ones when it cannot, or raises ``UnsupportedPathOperation``
+    when neither is possible.
     """
 
     __slots__ = ()

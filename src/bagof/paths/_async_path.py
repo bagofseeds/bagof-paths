@@ -85,7 +85,10 @@ class AsyncFile:
 
 
 class AsyncPath(PurePathMixin, BaseWrapper):
-    """A path-like object exposed through one uniform, async pathlib surface.
+    """The ``await`` version of :class:`Path`: the same methods, as coroutines.
+
+    The parts that only describe a path (``name``, ``parent``, ``/``) stay
+    plain; the parts that touch storage are awaited.
 
     ```pycon
     >>> import asyncio
