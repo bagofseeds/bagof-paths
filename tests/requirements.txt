@@ -1,1 +1,7 @@
 pytest>=7
+# The driver adapters (and, in later phases, the parity accessors) are
+# covered against the real backends; installed here so the coverage job -- a
+# single interpreter -- measures those paths too. Markered off the 3.8 leg,
+# which stays core-only (these require >= 3.9).
+universal-pathlib; python_version >= '3.9'
+cloudpathlib; python_version >= '3.9'

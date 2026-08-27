@@ -26,5 +26,10 @@ PATH_ITER = "path_iter"    # an iterable of driver paths -> wrapper generator
 # Used for __fspath__ and (later) default-driver selection.
 LOCAL_PROTOCOLS = frozenset({"", "file", "local"})
 
+# Members handled by the driver-adapter layer rather than the engine.
+ADAPTER_MEMBERS = frozenset(
+    {"rmdir", "copy", "copy_into", "move", "move_into", "walk"}
+)
+
 # Members computed lexically (see _match.py), delegated to neither.
 COMPUTED_MEMBERS = frozenset({"match", "full_match"})
