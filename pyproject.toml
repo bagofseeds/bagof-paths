@@ -41,6 +41,10 @@ upath = ["universal-pathlib"]
 cloud = ["cloudpathlib"]
 test = [
     "pytest>=7",
+    # The driver adapters are exercised against the real backends where the
+    # interpreter supports them; the 3.8 leg stays core-only by the marker.
+    "universal-pathlib; python_version >= '3.9'",
+    "cloudpathlib; python_version >= '3.9'",
 ]
 
 [build-system]

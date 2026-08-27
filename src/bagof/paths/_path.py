@@ -6,8 +6,8 @@ import os
 
 import typing_extensions as tx
 
+from . import _drivers, _match
 from . import _engine as engine
-from . import _match
 from ._base import BaseWrapper
 from ._spec import BY_NAME
 
@@ -284,6 +284,73 @@ class Path(BaseWrapper):
             self, BY_NAME["unlink"], (), {"missing_ok": missing_ok}
         )
 
+    def rmdir(self, *, recursive: bool = False) -> None:
+        """Remove the directory at the path.
+
+        With ``recursive=True`` the whole tree is removed. The default is
+        non-recursive and stays safe even on drivers whose own ``rmdir``
+        recurses by default (universal-pathlib).
+        """
+        _drivers.adapter_for(self._wrapped).rmdir(self, recursive=recursive)
+
+    # -- copying and moving ------------------------------------------------
+    def copy(
+        self,
+        target: tx.Any,
+        *,
+        follow_symlinks: bool = True,
+        preserve_metadata: bool = False,
+    ) -> tx.Self:
+        """Copy this file or directory to ``target``; return the new path."""
+        driver_target = self._coerce_target(target)
+        _drivers.adapter_for(self._wrapped).copy(
+            self, driver_target,
+            follow_symlinks=follow_symlinks,
+            preserve_metadata=preserve_metadata,
+        )
+        return self.with_wrapped(driver_target)
+
+    def copy_into(
+        self,
+        target_dir: tx.Any,
+        *,
+        follow_symlinks: bool = True,
+        preserve_metadata: bool = False,
+    ) -> tx.Self:
+        """Copy into ``target_dir``, keeping this path's name."""
+        dest = self._coerce_target(target_dir) / self.name
+        return self.copy(
+            dest,
+            follow_symlinks=follow_symlinks,
+            preserve_metadata=preserve_metadata,
+        )
+
+    def move(self, target: tx.Any) -> tx.Self:
+        """Move this path to ``target``; return the new path."""
+        driver_target = self._coerce_target(target)
+        _drivers.adapter_for(self._wrapped).move(self, driver_target)
+        return self.with_wrapped(driver_target)
+
+    def move_into(self, target_dir: tx.Any) -> tx.Self:
+        """Move into ``target_dir``, keeping this path's name."""
+        dest = self._coerce_target(target_dir) / self.name
+        return self.move(dest)
+
+    # -- traversal ---------------------------------------------------------
+    def walk(
+        self,
+        top_down: bool = True,
+        on_error: tx.Optional[tx.Callable] = None,
+        follow_symlinks: bool = False,
+    ) -> tx.Iterator[tx.Tuple[tx.Self, tx.List[str], tx.List[str]]]:
+        """Walk the tree, yielding ``(path, dirnames, filenames)`` per dir."""
+        return _drivers.adapter_for(self._wrapped).walk(
+            self,
+            top_down=top_down,
+            on_error=on_error,
+            follow_symlinks=follow_symlinks,
+        )
+
     # -- resolving and expanding -------------------------------------------
     def resolve(self, strict: bool = False) -> tx.Self:
         """The absolute path, with symlinks resolved."""
@@ -305,8 +372,12 @@ class Path(BaseWrapper):
 
     def rename(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target`` and return the new path."""
-        return engine.invoke(self, BY_NAME["rename"], (target,))
+        return engine.invoke(
+            self, BY_NAME["rename"], (self._coerce_target(target),)
+        )
 
     def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target``, replacing any existing file."""
-        return engine.invoke(self, BY_NAME["replace"], (target,))
+        return engine.invoke(
+            self, BY_NAME["replace"], (self._coerce_target(target),)
+        )
