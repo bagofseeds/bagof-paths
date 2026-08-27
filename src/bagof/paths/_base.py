@@ -28,6 +28,7 @@ from pathlib import Path as LocalPath
 import typing_extensions as tx
 
 from ._constants import (
+    ACCESSOR_MEMBERS,
     ADAPTER_MEMBERS,
     COMPUTED_MEMBERS,
     LOCAL_PROTOCOLS,
@@ -35,6 +36,8 @@ from ._constants import (
 )
 from ._errors import UnsupportedPathOperation
 from ._spec import BY_NAME
+
+_MISSING = object()
 
 
 class BaseWrapper:
@@ -69,11 +72,45 @@ class BaseWrapper:
             )
         self._wrapped = path
 
+    # -- local-filesystem constructors -------------------------------------
+    # home/cwd/from_uri build a fresh path rather than wrap an existing one.
+    # They are inherently local, so they return a wrapper of this class over a
+    # stdlib path; on the async wrapper they stay synchronous, like the
+    # constructor and the lexical members.
+    @classmethod
+    def home(cls) -> tx.Self:
+        """A path for the user's home directory (local filesystem)."""
+        return cls(LocalPath.home())
+
+    @classmethod
+    def cwd(cls) -> tx.Self:
+        """A path for the current working directory (local filesystem)."""
+        return cls(LocalPath.cwd())
+
+    @classmethod
+    def from_uri(cls, uri: str) -> tx.Self:
+        """A path from a ``file://`` URI (local filesystem).
+
+        A URI naming another scheme (``s3://``, ``memory://``, ...) needs a
+        driver to interpret it; wrap a driver path built from the URI instead.
+        """
+        native = getattr(LocalPath, "from_uri", None)
+        if native is None:  # pathlib gained from_uri in 3.13
+            return cls(_local_from_file_uri(uri))  # pragma: no cover
+        return cls(native(uri))
+
     # -- the wrapped object -------------------------------------------------
     @property
     def wrapped(self) -> tx.Any:
         """The underlying path object this wrapper delegates to."""
         return self._wrapped
+
+    def _delegate_attr(self, name: str) -> tx.Any:
+        """Return a driver attribute, or raise if the driver lacks it."""
+        value = getattr(self._wrapped, name, _MISSING)
+        if value is _MISSING:
+            raise UnsupportedPathOperation(name, driver=self._wrapped)
+        return value
 
     # -- capability introspection ------------------------------------------
     def supports(self, name: str) -> bool:
@@ -97,6 +134,10 @@ class BaseWrapper:
             return self._supports_adapter_member(name)
         if name in COMPUTED_MEMBERS:
             return True
+        if name in ACCESSOR_MEMBERS:
+            # Answered on the wrapped object: reading the property itself
+            # would raise UnsupportedPathOperation for a driver that lacks it.
+            return hasattr(self._wrapped, name)
         # Location properties (protocol, path, drive, ...) resolve directly.
         return not name.startswith("_") and hasattr(self, name)
 
@@ -111,7 +152,10 @@ class BaseWrapper:
 
     def capabilities(self) -> tx.FrozenSet[str]:
         """The set of members that are wired for this path (see supports)."""
-        names = set(BY_NAME) | ADAPTER_MEMBERS | COMPUTED_MEMBERS
+        names = (
+            set(BY_NAME) | ADAPTER_MEMBERS | COMPUTED_MEMBERS
+            | ACCESSOR_MEMBERS
+        )
         return frozenset(name for name in names if self.supports(name))
 
     # -- derivation ---------------------------------------------------------
@@ -189,6 +233,57 @@ class BaseWrapper:
         value = getattr(self._wrapped, "anchor", None)
         return value if isinstance(value, str) else self.drive + self.root
 
+    # -- driver-specific accessors -----------------------------------------
+    # Metadata and handles a particular driver exposes. Each delegates to the
+    # wrapped object and raises UnsupportedPathOperation when it is absent, so
+    # driver-native state is reachable without reaching for `.wrapped`. They
+    # return driver-native values unchanged and stay synchronous on both
+    # wrappers, matching how the underlying drivers expose them.
+    @property
+    def info(self) -> tx.Any:
+        """A metadata accessor for the path (universal-pathlib/cloud)."""
+        return self._delegate_attr("info")
+
+    @property
+    def storage_options(self) -> tx.Any:
+        """The driver's storage options (universal-pathlib/fsspec)."""
+        return self._delegate_attr("storage_options")
+
+    @property
+    def fs(self) -> tx.Any:
+        """The underlying fsspec filesystem (universal-pathlib)."""
+        return self._delegate_attr("fs")
+
+    @property
+    def bucket(self) -> tx.Any:
+        """The bucket the path lives in (cloudpathlib)."""
+        return self._delegate_attr("bucket")
+
+    @property
+    def key(self) -> tx.Any:
+        """The object key within the bucket (cloudpathlib)."""
+        return self._delegate_attr("key")
+
+    @property
+    def client(self) -> tx.Any:
+        """The cloud client backing the path (cloudpathlib)."""
+        return self._delegate_attr("client")
+
+    @property
+    def cloud_prefix(self) -> tx.Any:
+        """The scheme prefix of the cloud path, e.g. ``"s3://"``."""
+        return self._delegate_attr("cloud_prefix")
+
+    @property
+    def fspath(self) -> tx.Any:
+        """The local cache path for the object (cloudpathlib)."""
+        return self._delegate_attr("fspath")
+
+    @property
+    def etag(self) -> tx.Any:
+        """The stored entity tag of the object (cloudpathlib)."""
+        return self._delegate_attr("etag")
+
     # -- identity -----------------------------------------------------------
     def _key(self) -> tx.Tuple[str, str]:
         # Driver-independent: two wrappers of the same family pointing at the
@@ -235,6 +330,26 @@ class BaseWrapper:
         if isinstance(other, BaseWrapper):
             other = other._wrapped
         return self.with_wrapped(other / self._wrapped)
+
+
+def _local_from_file_uri(uri: str) -> LocalPath:  # pragma: no cover
+    """Build a local path from a ``file://`` URI on pathlib < 3.13.
+
+    Only the ``file`` scheme maps to a local path; anything else needs a
+    driver to interpret it and is refused, the way the constructor refuses a
+    scheme-ful string.
+    """
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname
+
+    match = SCHEME_RE.match(uri)
+    scheme = match.group(1) if match else ""
+    if scheme != "file":
+        raise ValueError(
+            f"cannot build a local path from {uri!r}; a URL scheme like "
+            f"{scheme!r} needs a driver to interpret it"
+        )
+    return LocalPath(url2pathname(urlparse(uri).path))
 
 
 def _is_path_shaped(obj: tx.Any) -> bool:

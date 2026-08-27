@@ -73,6 +73,18 @@ class PurePathMixin:
         """A new path with the suffix changed to ``suffix``."""
         return engine.invoke(self, BY_NAME["with_suffix"], (suffix,))
 
+    def with_segments(self, *segments: tx.Any) -> tx.Self:
+        """A new path of the same kind built from the given segments."""
+        return engine.invoke(self, BY_NAME["with_segments"], segments)
+
+    def is_reserved(self) -> bool:
+        """Whether the path is reserved under Windows naming rules."""
+        return engine.invoke(self, BY_NAME["is_reserved"])
+
+    def joinuri(self, uri: tx.Any) -> tx.Self:
+        """Join a URI onto the path (universal-pathlib)."""
+        return engine.invoke(self, BY_NAME["joinuri"], (uri,))
+
     def as_posix(self) -> str:
         """The path as a string with forward slashes."""
         return engine.invoke(self, BY_NAME["as_posix"])

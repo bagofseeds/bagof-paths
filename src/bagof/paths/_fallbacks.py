@@ -14,8 +14,12 @@ The engine looks a fallback up by name (the ``fallback`` field of a spec
 from __future__ import annotations
 
 import io
+import os
 
 import typing_extensions as tx
+
+from ._constants import LOCAL_PROTOCOLS
+from ._errors import UnsupportedPathOperation
 
 
 def read_bytes(wrapper: tx.Any) -> bytes:
@@ -95,6 +99,90 @@ def is_relative_to(wrapper: tx.Any, other: tx.Any) -> bool:
     return True
 
 
+def with_segments(wrapper: tx.Any, *segments: tx.Any) -> tx.Any:
+    """``with_segments`` from the wrapped type (pathlib gained it in 3.12).
+
+    A local path is reconstructed through its own constructor, the same
+    construction ``pathlib`` performs internally when deriving a path. A
+    non-local driver is refused rather than reconstructed: its configuration
+    (storage options, a client, credentials) lives in constructor arguments a
+    bare ``type(wrapped)(*segments)`` would drop, silently pointing the new
+    path at a different or unauthenticated store.
+    """
+    if wrapper.protocol not in LOCAL_PROTOCOLS:
+        raise UnsupportedPathOperation(
+            "with_segments",
+            driver=wrapper._wrapped,
+            hint=(
+                "this driver has no with_segments and cannot be rebuilt from "
+                "segments without dropping its configuration; upgrade the "
+                "driver to a version that provides with_segments"
+            ),
+        )
+    return type(wrapper._wrapped)(*segments)
+
+
+def hardlink_to(wrapper: tx.Any, target: tx.Any) -> None:
+    """``hardlink_to`` from ``os.link`` (pathlib gained it in 3.10).
+
+    Makes this path a new hard link to ``target``. Hard links are a local
+    filesystem operation, so a non-local driver without a native
+    ``hardlink_to`` is refused rather than guessed at.
+    """
+    if wrapper.protocol not in LOCAL_PROTOCOLS:
+        raise UnsupportedPathOperation(
+            "hardlink_to",
+            driver=wrapper._wrapped,
+            hint="hard links are a local-filesystem operation",
+        )
+    os.link(os.fspath(target), os.fspath(wrapper._wrapped))
+
+
+def is_junction(wrapper: tx.Any) -> bool:
+    """``is_junction`` for drivers/versions without it.
+
+    Junctions are a Windows filesystem concept; a local path is tested with
+    :func:`os.path.isjunction` (itself added in 3.12), and anything else --
+    an older interpreter, a non-local path -- is not a junction.
+    """
+    isjunction = getattr(os.path, "isjunction", None)
+    if isjunction is not None and wrapper.protocol in LOCAL_PROTOCOLS:
+        return isjunction(os.fspath(wrapper._wrapped))
+    return False
+
+
+def as_url(wrapper: tx.Any, **kwargs: tx.Any) -> str:
+    """``as_url`` from ``as_uri``.
+
+    A plain URI is the driver-independent URL. Presigning and other keyword
+    options are driver-native, so a call that passes them on a driver without
+    its own ``as_url`` is refused rather than silently answered with an
+    unsigned URI.
+    """
+    if kwargs:
+        raise UnsupportedPathOperation(
+            "as_url",
+            driver=wrapper._wrapped,
+            hint=(
+                "this driver cannot presign or take as_url options; a plain "
+                "URL is available as as_uri(), or use a driver with a native "
+                "as_url"
+            ),
+        )
+    return wrapper.as_uri()
+
+
+def link_to(wrapper: tx.Any, target: tx.Any) -> None:
+    """``link_to`` from ``hardlink_to`` (removed from pathlib in 3.12).
+
+    ``link_to`` makes *target* a hard link to this path -- the reverse
+    argument order of :meth:`hardlink_to`, which makes *this path* a link to
+    its argument -- so the synthesis creates the link at ``target``.
+    """
+    driver_target = wrapper._coerce_target(target)
+    wrapper.with_wrapped(driver_target).hardlink_to(wrapper._wrapped)
+
+
 # name -> synthesis function, resolved by the engine from a Member.fallback.
 FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
     "read_bytes": read_bytes,
@@ -103,4 +191,9 @@ FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
     "write_text": write_text,
     "with_stem": with_stem,
     "is_relative_to": is_relative_to,
+    "with_segments": with_segments,
+    "hardlink_to": hardlink_to,
+    "is_junction": is_junction,
+    "link_to": link_to,
+    "as_url": as_url,
 }
