@@ -284,12 +284,97 @@ def test_walk() -> None:
 
 # -- lexical members --------------------------------------------------------
 def test_lexical_members_are_synchronous() -> None:
-    p = AsyncPath("memasync://bucket/dir/file.txt")
-    assert p.name == "file.txt"
-    assert p.suffix == ".txt"
+    p = AsyncPath("memasync://bucket/dir/file.tar.gz")
+    assert p.name == "file.tar.gz"
+    assert p.stem == "file.tar"
+    assert p.suffix == ".gz"
+    assert p.suffixes == [".tar", ".gz"]
+    assert "bucket" in p.parts
     assert str(p.parent) == "memasync://bucket/dir"
+    assert [pp.name for pp in p.parents][0] == "dir"
     assert (p.parent / "other.txt").name == "other.txt"
     assert p.with_name("z.bin").name == "z.bin"
+    assert p.with_suffix(".zip").name == "file.tar.zip"
+    assert p.is_absolute() is True
+    assert p.as_posix().endswith("file.tar.gz")
+    assert p.joinpath("x", "y").name == "y"
+    # with_segments with several relative parts joins them lexically.
+    assert p.with_segments("a", "b", "c.txt").name == "c.txt"
+
+
+def test_driver_repr() -> None:
+    p = AsyncFSPath.from_url("memasync://bucket/k", "memasync", {})
+    assert repr(p) == "AsyncFSPath('memasync://bucket/k')"
+
+
+# -- more I/O coverage ------------------------------------------------------
+def test_is_file_on_missing_is_false() -> None:
+    async def go() -> object:
+        return await AsyncPath("memasync://b/none.txt").is_file()
+
+    assert _run(go()) is False
+
+
+def test_mkdir() -> None:
+    async def go() -> object:
+        d = AsyncPath("memasync://b/newdir")
+        await d.mkdir(parents=True, exist_ok=True)
+        # A file placed inside proves the directory is usable.
+        await (d / "inside.txt").write_bytes(b"z")
+        return await (d / "inside.txt").exists()
+
+    assert _run(go()) is True
+
+
+def test_read_write_text_with_encoding() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/enc.txt")
+        await p.write_text("café", encoding="latin-1")
+        return await p.read_text(encoding="latin-1")
+
+    assert _run(go()) == "café"
+
+
+def test_open_append() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/log.txt")
+        await p.write_text("one\n")
+        async with await p.open("a") as fh:
+            await fh.write("two\n")
+        return await p.read_text()
+
+    assert _run(go()) == "one\ntwo\n"
+
+
+def test_move_and_bare_name_and_string_dir_targets() -> None:
+    async def go() -> object:
+        src = AsyncPath("memasync://b/mv/a.txt")
+        await src.write_bytes(b"1")
+        # move() (rename alias) to a wrapped target
+        moved = await src.move(AsyncPath("memasync://b/mv/b.txt"))
+        # copy to a bare-name target (resolved against the parent)
+        copied = await moved.copy("c.txt")
+        # copy_into a string directory
+        into = await moved.copy_into("/b/mv/sub")
+        return (
+            moved.name,
+            copied.name,
+            await AsyncPath("memasync://b/mv/c.txt").read_bytes(),
+            into.name,
+            await AsyncPath("memasync://b/mv/sub/b.txt").read_bytes(),
+        )
+
+    assert _run(go()) == ("b.txt", "c.txt", b"1", "b.txt", b"1")
+
+
+def test_resolve_and_absolute() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/r/x.txt")
+        r = await p.resolve()
+        a = await p.absolute()
+        return r == p, a == p
+
+    assert _run(go()) == (True, True)
 
 
 # -- identity ---------------------------------------------------------------
@@ -337,5 +422,7 @@ def test_is_async_filesystem() -> None:
 
 
 def test_freeze_is_hashable() -> None:
-    token = _freeze({"a": 1, "nested": {"k": [1, 2]}, "obj": object()})
+    # dict, nested list, a hashable leaf, and an unhashable leaf (a set, which
+    # falls back to repr) all collapse to something hashable.
+    token = _freeze({"a": 1, "nested": {"k": [1, 2]}, "unhashable": {1, 2}})
     assert isinstance(hash(token), int)

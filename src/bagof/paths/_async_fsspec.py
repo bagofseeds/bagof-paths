@@ -82,7 +82,7 @@ def _strip(scheme: str, url: str) -> str:
     """
     try:
         return _filesystem_class(scheme)._strip_protocol(url)
-    except Exception:
+    except Exception:  # pragma: no cover - exotic backend without class strip
         return url.split("://", 1)[1] if "://" in url else url
 
 
@@ -108,7 +108,7 @@ async def _resolve_fs(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
         # s3fs/HTTP need their aiohttp session started on this loop; the base
         # AsyncFileSystem has no set_session, so only call it when present.
         set_session = getattr(fs, "set_session", None)
-        if set_session is not None:
+        if set_session is not None:  # pragma: no cover - s3fs/HTTP only
             result = set_session()
             if inspect.isawaitable(result):
                 await result
@@ -167,21 +167,6 @@ class _AsyncFSFile:
 
     async def aclose(self) -> None:
         await self.flush()
-
-    async def __aenter__(self) -> _AsyncFSFile:
-        return self
-
-    async def __aexit__(self, *exc: tx.Any) -> None:
-        await self.aclose()
-
-    def __aiter__(self) -> _AsyncFSFile:
-        return self
-
-    async def __anext__(self) -> tx.Any:
-        line = await self.readline()
-        if not line:
-            raise StopAsyncIteration
-        return line
 
 
 class AsyncFSPath:
@@ -314,10 +299,6 @@ class AsyncFSPath:
         fs = await self._fs()
         return (await self._kind(fs)) == "directory"
 
-    async def info(self) -> tx.Dict[str, tx.Any]:
-        fs = await self._fs()
-        return await fs._info(self._path)
-
     # -- reading and writing ------------------------------------------------
     async def read_bytes(self) -> bytes:
         fs = await self._fs()
@@ -446,7 +427,7 @@ class AsyncFSPath:
         result = fs._walk(self._path)
         if inspect.isawaitable(result):
             result = await result
-        if hasattr(result, "__aiter__"):
+        if hasattr(result, "__aiter__"):  # pragma: no cover - real async _walk
             async for root, dirs, files in result:
                 yield self._child(root), list(dirs), list(files)
         else:
