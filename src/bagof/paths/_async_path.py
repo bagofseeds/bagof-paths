@@ -1,37 +1,47 @@
 """The asynchronous path wrapper.
 
 ``AsyncPath`` exposes the same surface as :class:`~bagof.paths.Path`, but its
-concrete, I/O-touching members are coroutines. It wraps a *synchronous* driver
-(``pathlib``, ``UPath``, ``cloudpathlib``) by running that driver's blocking
-work on a sync view of the path in a worker thread, so the event loop is never
-stalled and the whole synchronous implementation -- engine, fallbacks,
-adapters -- is reused rather than written a second time. The pure-path
-(lexical) members are inherited unchanged: they never block, so they stay
-synchronous, exactly as on ``Path``.
+concrete, I/O-touching members are coroutines. It handles two kinds of driver:
 
-Wrapping a *natively asynchronous* driver (one whose methods are coroutines)
-is not yet supported and is a planned addition; today such a driver's methods
-would be called through the sync view and return un-awaited coroutines.
+- a **synchronous** driver (``pathlib``, ``UPath``, ``cloudpathlib``) is run on
+  a sync view of the path in a worker thread, so the event loop is never
+  stalled and the whole synchronous implementation -- engine, fallbacks,
+  adapters -- is reused rather than written a second time;
+- a **natively asynchronous** driver (one whose methods are coroutines, such
+  as ``anyio.Path``) is awaited directly, with no thread. For the few members
+  such a driver does not have (``copy``, ``walk``, ...), a local stdlib view is
+  run in a thread as a fallback, so the whole surface still works.
+
+The pure-path (lexical) members are inherited unchanged: they never block, so
+they stay synchronous, exactly as on ``Path``.
 """
 
 from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path as LocalPath
 
 import typing_extensions as tx
 
 from . import _bridge as bridge
+from . import _engine as engine
 from ._base import BaseWrapper
+from ._constants import LOCAL_PROTOCOLS
 from ._errors import UnsupportedPathOperation
 from ._path import Path
 from ._purepath import PurePathMixin
+from ._spec import BY_NAME
 
 _WALK_DONE = object()
 
+# type(driver) -> whether its members are coroutines. Detection is a property
+# of the driver class, so it is worked out once and cached (like the adapter
+# registry), not on every call.
+_ASYNC_DRIVER: tx.Dict[type, bool] = {}
 
-def _is_async_driver(wrapped: tx.Any) -> bool:
-    """Whether a wrapped object's members are coroutines (unsupported)."""
+
+def _detect_async(wrapped: tx.Any) -> bool:
     for name in ("exists", "open", "iterdir", "stat"):
         member = getattr(wrapped, name, None)
         if member is not None and (
@@ -40,6 +50,16 @@ def _is_async_driver(wrapped: tx.Any) -> bool:
         ):
             return True
     return False
+
+
+def _is_async_driver(wrapped: tx.Any) -> bool:
+    """Whether a wrapped object's members are coroutines."""
+    kind = type(wrapped)
+    cached = _ASYNC_DRIVER.get(kind)
+    if cached is None:
+        cached = _detect_async(wrapped)
+        _ASYNC_DRIVER[kind] = cached
+    return cached
 
 
 class AsyncFile:
@@ -84,6 +104,76 @@ class AsyncFile:
         return line
 
 
+class _NativeAsyncFile:
+    """An async view over a file handle that is *already* asynchronous.
+
+    A native driver's ``open`` returns a handle whose reads and writes are
+    coroutines (``anyio``), or an async context manager that yields one
+    (``aiopath``). Either way its operations are awaited directly, with no
+    thread. The context manager, when there is one, is held so that closing
+    finalizes it.
+    """
+
+    def __init__(self, handle: tx.Any, cm: tx.Any = None) -> None:
+        self._handle = handle
+        self._cm = cm
+
+    async def read(self, *args: tx.Any) -> tx.Any:
+        return await self._handle.read(*args)
+
+    async def readline(self, *args: tx.Any) -> tx.Any:
+        return await self._handle.readline(*args)
+
+    async def write(self, data: tx.Any) -> int:
+        return await self._handle.write(data)
+
+    async def flush(self) -> None:
+        flush = getattr(self._handle, "flush", None)
+        if flush is not None:
+            result = flush()
+            if inspect.isawaitable(result):
+                await result
+
+    async def close(self) -> None:
+        if self._cm is not None:
+            await self._cm.__aexit__(None, None, None)
+            return
+        # Prefer the async close; never await a plain sync close (some drivers
+        # leak the underlying object's sync close through delegation).
+        aclose = getattr(self._handle, "aclose", None)
+        if aclose is not None:
+            result = aclose()
+            if inspect.isawaitable(result):
+                await result
+
+    async def __aenter__(self) -> _NativeAsyncFile:
+        return self
+
+    async def __aexit__(self, *exc: tx.Any) -> None:
+        await self.close()
+
+    def __aiter__(self) -> _NativeAsyncFile:
+        return self
+
+    async def __anext__(self) -> tx.Any:
+        line = await self.readline()
+        if not line:
+            raise StopAsyncIteration
+        return line
+
+
+async def _adapt_async_file(opened: tx.Any) -> _NativeAsyncFile:
+    """Turn what a native driver's ``open`` returned into an async file."""
+    if inspect.isawaitable(opened):
+        # anyio: a coroutine that resolves to the handle.
+        return _NativeAsyncFile(await opened)
+    if hasattr(opened, "__aenter__") and not hasattr(opened, "read"):
+        # aiopath: an async context manager; enter it and keep it to close.
+        handle = await opened.__aenter__()
+        return _NativeAsyncFile(handle, cm=opened)
+    return _NativeAsyncFile(opened)
+
+
 class AsyncPath(PurePathMixin, BaseWrapper):
     """The ``await`` version of :class:`Path`: the same methods, as coroutines.
 
@@ -108,90 +198,156 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     # thread where the synchronous implementation actually runs.
     _sync_type: tx.ClassVar[tx.Type[Path]] = Path
 
-    def __init__(self, path: tx.Any, *, driver: tx.Any = None) -> None:
-        super().__init__(path, driver=driver)
-        if _is_async_driver(self._wrapped):
+    # -- delegation plumbing ----------------------------------------------
+    def _sync(self) -> Path:
+        """A synchronous view to run in a thread.
+
+        For a sync driver, a view over the driver itself. For a native async
+        driver there is no such view, so a local stdlib view over the same
+        filesystem path stands in -- used only for the members the driver
+        lacks. A non-local async driver has no local stand-in.
+        """
+        wrapped = self._wrapped
+        if _is_async_driver(wrapped):
+            if self.protocol in LOCAL_PROTOCOLS:
+                return self._sync_type(LocalPath(os.fspath(wrapped)))
             raise UnsupportedPathOperation(
-                "AsyncPath over an async driver",
-                driver=self._wrapped,
+                "this operation",
+                driver=wrapped,
                 hint=(
-                    "this driver is natively asynchronous, which AsyncPath "
-                    "does not yet support; wrap a synchronous driver"
+                    "this async driver has no synchronous view; only the "
+                    "methods it implements itself are available"
                 ),
             )
-
-    # -- bridge plumbing ---------------------------------------------------
-    def _sync(self) -> Path:
-        """A synchronous view over the same wrapped driver."""
-        return self._sync_type(self._wrapped)
+        return self._sync_type(wrapped)
 
     def _wrap(self, result: tx.Any) -> tx.Any:
         """Re-wrap a sync path result as an async one of this path's type."""
         if isinstance(result, Path):
-            return self.with_wrapped(result._wrapped)
+            driver = result._wrapped
+            if _is_async_driver(self._wrapped) and not isinstance(
+                driver, type(self._wrapped)
+            ):
+                # A result from the local stdlib fallback view: put it back in
+                # the native driver's family so derived paths stay native.
+                driver = type(self._wrapped)(str(driver))
+            return self.with_wrapped(driver)
         return result
+
+    async def _call(
+        self,
+        name: str,
+        args: tx.Tuple[tx.Any, ...] = (),
+        kwargs: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+    ) -> tx.Any:
+        """Run one engine member: await the driver, or bridge a sync view."""
+        kwargs = dict(kwargs or {})
+        if _is_async_driver(self._wrapped):
+            method = getattr(self._wrapped, name, None)
+            if method is not None:
+                member = BY_NAME[name]
+                call_kwargs = engine._drop_defaults(kwargs, member.normalize)
+                call_args = tuple(engine._unwrap(a) for a in args)
+                result = method(*call_args, **call_kwargs)
+                if inspect.isawaitable(result):
+                    result = await result
+                return engine._finish(self, result, member.result)
+        # Sync driver, or a native driver that lacks this member.
+        result = await bridge.run(getattr(self._sync(), name), *args, **kwargs)
+        return self._wrap(result)
+
+    async def _aiter(
+        self,
+        name: str,
+        args: tx.Tuple[tx.Any, ...] = (),
+        kwargs: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+    ) -> tx.AsyncIterator[tx.Self]:
+        """Iterate a directory member: async on the driver, or bridged."""
+        kwargs = dict(kwargs or {})
+        if _is_async_driver(self._wrapped):
+            method = getattr(self._wrapped, name, None)
+            if method is not None:
+                member = BY_NAME[name]
+                call_kwargs = engine._drop_defaults(kwargs, member.normalize)
+                call_args = tuple(engine._unwrap(a) for a in args)
+                iterator = method(*call_args, **call_kwargs)
+                if inspect.isawaitable(iterator):
+                    iterator = await iterator
+                if hasattr(iterator, "__aiter__"):
+                    async for item in iterator:
+                        yield self.with_wrapped(item)
+                else:
+                    for item in iterator:
+                        yield self.with_wrapped(item)
+                return
+        sync = self._sync()
+        items = await bridge.run(
+            lambda: list(getattr(sync, name)(*args, **kwargs))
+        )
+        for item in items:
+            yield self._wrap(item)
 
     # -- status queries ----------------------------------------------------
     async def exists(self, *, follow_symlinks: bool = True) -> bool:
         """Whether the path exists."""
-        return await bridge.run(
-            self._sync().exists, follow_symlinks=follow_symlinks
+        return await self._call(
+            "exists", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def is_file(self, *, follow_symlinks: bool = True) -> bool:
         """Whether the path is a regular file."""
-        return await bridge.run(
-            self._sync().is_file, follow_symlinks=follow_symlinks
+        return await self._call(
+            "is_file", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def is_dir(self, *, follow_symlinks: bool = True) -> bool:
         """Whether the path is a directory."""
-        return await bridge.run(
-            self._sync().is_dir, follow_symlinks=follow_symlinks
+        return await self._call(
+            "is_dir", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def is_symlink(self) -> bool:
         """Whether the path is a symbolic link."""
-        return await bridge.run(self._sync().is_symlink)
+        return await self._call("is_symlink")
 
     async def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
         """The result of ``stat`` on the path."""
-        return await bridge.run(
-            self._sync().stat, follow_symlinks=follow_symlinks
+        return await self._call(
+            "stat", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def lstat(self) -> os.stat_result:
         """Like :meth:`stat`, without following symbolic links."""
-        return await bridge.run(self._sync().lstat)
+        return await self._call("lstat")
 
     async def samefile(self, other: tx.Any) -> bool:
         """Whether the path and ``other`` refer to the same file."""
-        return await bridge.run(self._sync().samefile, other)
+        return await self._call("samefile", (other,))
 
     # -- extended status queries -------------------------------------------
     async def is_mount(self) -> bool:
         """Whether the path is a mount point."""
-        return await bridge.run(self._sync().is_mount)
+        return await self._call("is_mount")
 
     async def is_socket(self) -> bool:
         """Whether the path is a Unix domain socket."""
-        return await bridge.run(self._sync().is_socket)
+        return await self._call("is_socket")
 
     async def is_fifo(self) -> bool:
         """Whether the path is a FIFO (named pipe)."""
-        return await bridge.run(self._sync().is_fifo)
+        return await self._call("is_fifo")
 
     async def is_block_device(self) -> bool:
         """Whether the path is a block device."""
-        return await bridge.run(self._sync().is_block_device)
+        return await self._call("is_block_device")
 
     async def is_char_device(self) -> bool:
         """Whether the path is a character device."""
-        return await bridge.run(self._sync().is_char_device)
+        return await self._call("is_char_device")
 
     async def is_junction(self) -> bool:
         """Whether the path is a junction (a Windows concept; else False)."""
-        return await bridge.run(self._sync().is_junction)
+        return await self._call("is_junction")
 
     # -- reading and writing -----------------------------------------------
     async def open(
@@ -201,12 +357,25 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         encoding: tx.Optional[str] = None,
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
-    ) -> AsyncFile:
+    ) -> tx.Any:
         """Open the path and return an async file object.
 
-        The handle's own reads and writes are each a thread hop, so they do
-        not block the event loop. Use it with ``async with`` / ``async for``.
+        Use it with ``async with`` / ``async for``. The handle's reads and
+        writes are awaited directly on a native driver, or run in a worker
+        thread on a synchronous one.
         """
+        kwargs = {
+            "buffering": buffering, "encoding": encoding,
+            "errors": errors, "newline": newline,
+        }
+        if _is_async_driver(self._wrapped):
+            driver_open = getattr(self._wrapped, "open", None)
+            if driver_open is not None:
+                call_kwargs = engine._drop_defaults(
+                    kwargs, BY_NAME["open"].normalize
+                )
+                opened = driver_open(mode, **call_kwargs)
+                return await _adapt_async_file(opened)
         handle = await bridge.run(
             self._sync().open, mode,
             buffering=buffering, encoding=encoding,
@@ -216,7 +385,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
 
     async def read_bytes(self) -> bytes:
         """Read the whole file as bytes."""
-        return await bridge.run(self._sync().read_bytes)
+        return await self._call("read_bytes")
 
     async def read_text(
         self,
@@ -225,14 +394,14 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         newline: tx.Optional[str] = None,
     ) -> str:
         """Read the whole file as text."""
-        return await bridge.run(
-            self._sync().read_text,
-            encoding=encoding, errors=errors, newline=newline,
+        return await self._call(
+            "read_text", (),
+            {"encoding": encoding, "errors": errors, "newline": newline},
         )
 
     async def write_bytes(self, data: tx.Any) -> int:
         """Write ``data`` to the file as bytes, replacing any content."""
-        return await bridge.run(self._sync().write_bytes, data)
+        return await self._call("write_bytes", (data,))
 
     async def write_text(
         self,
@@ -242,17 +411,16 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         newline: tx.Optional[str] = None,
     ) -> int:
         """Write ``data`` to the file as text, replacing any content."""
-        return await bridge.run(
-            self._sync().write_text, data,
-            encoding=encoding, errors=errors, newline=newline,
+        return await self._call(
+            "write_text", (data,),
+            {"encoding": encoding, "errors": errors, "newline": newline},
         )
 
     # -- directory iteration -----------------------------------------------
     async def iterdir(self) -> tx.AsyncIterator[tx.Self]:
         """Yield the paths of the directory's entries."""
-        sync = self._sync()
-        for item in await bridge.run(lambda: list(sync.iterdir())):
-            yield self._wrap(item)
+        async for item in self._aiter("iterdir"):
+            yield item
 
     async def glob(
         self,
@@ -262,18 +430,14 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         recurse_symlinks: bool = False,
     ) -> tx.AsyncIterator[tx.Self]:
         """Yield the paths matching ``pattern`` under this directory."""
-        sync = self._sync()
-        items = await bridge.run(
-            lambda: list(
-                sync.glob(
-                    pattern,
-                    case_sensitive=case_sensitive,
-                    recurse_symlinks=recurse_symlinks,
-                )
-            )
-        )
-        for item in items:
-            yield self._wrap(item)
+        async for item in self._aiter(
+            "glob", (pattern,),
+            {
+                "case_sensitive": case_sensitive,
+                "recurse_symlinks": recurse_symlinks,
+            },
+        ):
+            yield item
 
     async def rglob(
         self,
@@ -283,36 +447,33 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         recurse_symlinks: bool = False,
     ) -> tx.AsyncIterator[tx.Self]:
         """Like :meth:`glob`, recursively."""
-        sync = self._sync()
-        items = await bridge.run(
-            lambda: list(
-                sync.rglob(
-                    pattern,
-                    case_sensitive=case_sensitive,
-                    recurse_symlinks=recurse_symlinks,
-                )
-            )
-        )
-        for item in items:
-            yield self._wrap(item)
+        async for item in self._aiter(
+            "rglob", (pattern,),
+            {
+                "case_sensitive": case_sensitive,
+                "recurse_symlinks": recurse_symlinks,
+            },
+        ):
+            yield item
 
     # -- creation ----------------------------------------------------------
     async def mkdir(
         self, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
     ) -> None:
         """Create a directory at the path."""
-        await bridge.run(
-            self._sync().mkdir, mode, parents=parents, exist_ok=exist_ok
+        await self._call(
+            "mkdir", (),
+            {"mode": mode, "parents": parents, "exist_ok": exist_ok},
         )
 
     async def touch(self, mode: int = 0o666, exist_ok: bool = True) -> None:
         """Create the file at the path, or update its modification time."""
-        await bridge.run(self._sync().touch, mode, exist_ok=exist_ok)
+        await self._call("touch", (), {"mode": mode, "exist_ok": exist_ok})
 
     # -- removal -----------------------------------------------------------
     async def unlink(self, *, missing_ok: bool = False) -> None:
         """Remove the file at the path."""
-        await bridge.run(self._sync().unlink, missing_ok=missing_ok)
+        await self._call("unlink", (), {"missing_ok": missing_ok})
 
     async def rmdir(self, *, recursive: bool = False) -> None:
         """Remove the directory at the path."""
@@ -385,49 +546,49 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     # -- resolving and expanding -------------------------------------------
     async def resolve(self, strict: bool = False) -> tx.Self:
         """The absolute path, with symlinks resolved."""
-        return self._wrap(await bridge.run(self._sync().resolve, strict))
+        return await self._call("resolve", (), {"strict": strict})
 
     async def absolute(self) -> tx.Self:
         """The absolute path, without resolving symlinks."""
-        return self._wrap(await bridge.run(self._sync().absolute))
+        return await self._call("absolute")
 
     async def expanduser(self) -> tx.Self:
         """The path with a leading ``~`` expanded."""
-        return self._wrap(await bridge.run(self._sync().expanduser))
+        return await self._call("expanduser")
 
     async def readlink(self) -> tx.Self:
         """The path a symbolic link points to."""
-        return self._wrap(await bridge.run(self._sync().readlink))
+        return await self._call("readlink")
 
     async def rename(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target`` and return the new path."""
-        return self._wrap(await bridge.run(self._sync().rename, target))
+        return await self._call("rename", (self._coerce_target(target),))
 
     async def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target``, replacing any existing file."""
-        return self._wrap(await bridge.run(self._sync().replace, target))
+        return await self._call("replace", (self._coerce_target(target),))
 
     # -- permissions and ownership -----------------------------------------
     async def chmod(self, mode: int, *, follow_symlinks: bool = True) -> None:
         """Change the file mode and permission bits."""
-        await bridge.run(
-            self._sync().chmod, mode, follow_symlinks=follow_symlinks
+        await self._call(
+            "chmod", (mode,), {"follow_symlinks": follow_symlinks}
         )
 
     async def lchmod(self, mode: int) -> None:
         """Like :meth:`chmod`, without following symbolic links."""
-        await bridge.run(self._sync().lchmod, mode)
+        await self._call("lchmod", (mode,))
 
     async def owner(self, *, follow_symlinks: bool = True) -> str:
         """The login name of the file's owner."""
-        return await bridge.run(
-            self._sync().owner, follow_symlinks=follow_symlinks
+        return await self._call(
+            "owner", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def group(self, *, follow_symlinks: bool = True) -> str:
         """The group name of the file."""
-        return await bridge.run(
-            self._sync().group, follow_symlinks=follow_symlinks
+        return await self._call(
+            "group", (), {"follow_symlinks": follow_symlinks}
         )
 
     # -- links -------------------------------------------------------------
@@ -435,14 +596,14 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         self, target: tx.Any, target_is_directory: bool = False
     ) -> None:
         """Make this path a symbolic link to ``target``."""
-        await bridge.run(
-            self._sync().symlink_to, target,
-            target_is_directory=target_is_directory,
+        await self._call(
+            "symlink_to", (target,),
+            {"target_is_directory": target_is_directory},
         )
 
     async def hardlink_to(self, target: tx.Any) -> None:
         """Make this path a hard link to ``target``."""
-        await bridge.run(self._sync().hardlink_to, target)
+        await self._call("hardlink_to", (target,))
 
     async def link_to(self, target: tx.Any) -> None:
         """Make ``target`` a hard link to this path.
@@ -453,26 +614,24 @@ class AsyncPath(PurePathMixin, BaseWrapper):
            3.12. Prefer :meth:`hardlink_to`; this is kept, and synthesized
            where the driver dropped it, only for backward compatibility.
         """
-        await bridge.run(self._sync().link_to, target)
+        await self._call("link_to", (target,))
 
     # -- cloud transfer and cache ------------------------------------------
     async def as_url(self, **kwargs: tx.Any) -> str:
         """A URL for the path; keyword arguments pass to the driver."""
-        return await bridge.run(self._sync().as_url, **kwargs)
+        return await self._call("as_url", (), kwargs)
 
     async def download_to(self, destination: tx.Any) -> tx.Any:
         """Download the path's contents to a local ``destination``."""
-        return await bridge.run(self._sync().download_to, destination)
+        return await self._call("download_to", (destination,))
 
     async def upload_from(self, source: tx.Any, **kwargs: tx.Any) -> tx.Any:
         """Upload a local ``source`` to the path."""
-        return self._wrap(
-            await bridge.run(self._sync().upload_from, source, **kwargs)
-        )
+        return await self._call("upload_from", (source,), kwargs)
 
     async def clear_cache(self) -> None:
         """Discard any locally cached copy of the path (cloudpathlib)."""
-        await bridge.run(self._sync().clear_cache)
+        await self._call("clear_cache")
 
     # -- recursive copy / remove aliases -----------------------------------
     async def rmtree(self) -> None:

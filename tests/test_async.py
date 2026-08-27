@@ -171,8 +171,8 @@ def test_walk_honors_pruning(tmp_path: pathlib.Path) -> None:
     _run(go())
 
 
-class _FakeAsyncDriver(os.PathLike):
-    """A natively-async driver (coroutine methods) -- not yet supported."""
+class _MinimalAsyncDriver(os.PathLike):
+    """A natively-async driver: its members are coroutines (awaited direct)."""
 
     def __fspath__(self) -> str:
         return "/x"
@@ -183,13 +183,13 @@ class _FakeAsyncDriver(os.PathLike):
     async def exists(self) -> bool:
         return True
 
-    async def open(self, *args: object, **kwargs: object) -> object:
-        return None
 
-
-def test_async_driver_is_rejected_cleanly() -> None:
-    with pytest.raises(UnsupportedPathOperation):
-        AsyncPath(_FakeAsyncDriver())
+def test_native_async_driver_is_awaited_directly() -> None:
+    # A driver whose methods are coroutines is wrapped and awaited, not run in
+    # a thread and not rejected (see tests/test_native_async.py for the full
+    # surface).
+    p = AsyncPath(_MinimalAsyncDriver())
+    assert asyncio.run(p.exists()) is True
 
 
 def test_sync_type_hook_honors_subclass(tmp_path: pathlib.Path) -> None:
