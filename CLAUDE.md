@@ -93,11 +93,17 @@ name would collide.
   key, scheme aliases folded, family-scoped (a sync path never equals an async
   one). Derivation flows through one hook, `with_wrapped`, so a subclass's
   state rides onto every derived path.
-- **`AsyncPath` reuses the whole sync implementation** by running a sync view
-  of the same driver in a worker thread (`_bridge.run` =
-  `loop.run_in_executor` + `functools.partial`, stdlib only, 3.8-safe). No
-  policy is written twice. A natively-async driver (coroutine methods) is
-  rejected cleanly for now.
+- **`AsyncPath` handles two kinds of driver.** A *synchronous* driver is run
+  on a sync view of the same driver in a worker thread (`_bridge.run` =
+  `loop.run_in_executor` + `functools.partial`, stdlib only, 3.8-safe), so no
+  policy is written twice. A *natively-async* driver (coroutine members, e.g.
+  `anyio.Path`) is awaited directly through the `_call`/`_aiter`/`open` seam;
+  the few members it lacks (`copy`, `walk`, ...) fall back to a **local stdlib
+  view** run in a thread, and results are re-wrapped back into the driver's
+  family. Which strategy applies is `_is_async_driver(wrapped)`, worked out
+  once per driver type and cached; a non-local async driver has no local
+  view, so a member it lacks raises rather than round-tripping through a cache
+  path.
 
 ### Adding a member to the surface
 
@@ -202,6 +208,9 @@ walk-fallback and `hardlink_to`-fallback tests) or it reads as uncovered.
 - A **dependency-free fallback driver** so a remote scheme works with no
   backend installed (today `Path("s3://…")` needs `upath` or `cloudpathlib`).
   The selection availability tail is an error branch it would append to.
-- **Natively-async drivers** (`AsyncPath` over a coroutine-method driver), and
-  a sync-over-async portal.
+- A **sync-over-async portal** -- `Path` (synchronous) over an async driver,
+  by driving an event loop. (`AsyncPath` over an async driver is done; the
+  reverse is not.) Also an async *cloud* path: no mature async cloud path
+  object exists, so async `s3://` would mean adapting fsspec's
+  `AsyncFileSystem` (filesystem-shaped, not a path).
 - A **`to()`** converter between drivers.

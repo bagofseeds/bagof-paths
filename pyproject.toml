@@ -45,6 +45,7 @@ test = [
     # interpreter supports them; the 3.8 leg stays core-only by the marker.
     "universal-pathlib; python_version >= '3.9'",
     "cloudpathlib; python_version >= '3.9'",
+    "anyio; python_version >= '3.9'",
 ]
 
 [build-system]
