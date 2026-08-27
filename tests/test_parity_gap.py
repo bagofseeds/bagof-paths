@@ -221,9 +221,11 @@ def test_home_cwd_from_uri(tmp_path: pathlib.Path) -> None:
     assert Path.from_uri(f.as_uri()) == Path(f)
 
 
-def test_from_uri_rejects_foreign_scheme() -> None:
+def test_from_uri_unknown_scheme_raises() -> None:
+    # from_uri routes a non-file scheme through the constructor's driver
+    # selection, so a scheme no backend can build raises (a ValueError).
     with pytest.raises(ValueError):
-        Path.from_uri("s3://bucket/key")
+        Path.from_uri("bogus+unknown://bucket/key")
 
 
 # -- driver-specific accessors: absent on local -----------------------------
