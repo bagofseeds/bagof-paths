@@ -5,6 +5,8 @@ errors these paths can raise.
 
 ## ::: bagof.paths.register_protocol
 
+## ::: bagof.paths.set_storage_options
+
 ## ::: bagof.paths.ProtocolTraits
 
 ## ::: bagof.paths.register_driver

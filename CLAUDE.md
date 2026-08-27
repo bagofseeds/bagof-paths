@@ -45,6 +45,7 @@ src/bagof/paths/
   _drivers.py    # driver adapters (rmdir/copy/move/walk divergence) +
                  #   register_driver
   _protocols.py  # ProtocolTraits, register_protocol, canonical_scheme
+  _detect.py     # is_async_driver: whether a driver's members are coroutines
   _select.py     # driver selection: build a backend from a URL string
   _purepath.py   # PurePathMixin: the lexical surface, shared sync by both
   _path.py       # Path: thin, real-signature methods over the engine
@@ -132,6 +133,30 @@ recognised scheme's real error, and any preferred driver's error, propagate.
 `register_protocol` carries a scheme's traits (bucketed, aliases, absolute) and
 optional preferred driver in one call; register protocols **at import time**,
 since traits feed a path's canonical identity.
+
+**Credentials ride on `storage_options`.** `Path(url, storage_options={...})`
+forwards a connection dict to the chosen factory. Per-scheme defaults are set
+with `set_storage_options(scheme, {...})`, which keeps the scheme's other
+traits; `register_protocol` **replaces a scheme wholesale**, so it is for
+*defining* a scheme, not for adding options to a built-in one (doing that
+would drop `bucketed`/`absolute` and detach aliases). A per-call dict
+overrides the per-scheme default key by key; the merge lives in
+`_protocols.merged_storage_options`, used by both `_select.build` and the
+explicit-`driver=` path in `_build_from_string` (so an explicit driver still
+gets the scheme's defaults). The factory contract is `driver(text,
+**options)`, called with the URL alone when there are no options (so a
+historical `str -> path` driver still works). A per-scheme default keys on the
+leading scheme, so an fsspec **chain** URL (`simplecache::s3://...`, whose
+identity scheme is empty) carries per-call options only. `storage_options` is valid
+only for a remote URL: a local path, a local scheme, or a pre-built driver
+object with options is a `TypeError`. cloudpathlib takes a `Client`, not an
+options dict, so options + only cloudpathlib available is a `TypeError`
+pointing at `driver=`. Secrets never reach a printed surface:
+`ProtocolTraits.__repr__` redacts `storage_options` to `<redacted>`; the
+`path.storage_options` accessor deliberately returns the live dict (secrets and
+all) and says so. A **synchronous `Path` refuses an async driver** at
+construction (`is_async_driver` in `_detect.py`, shared with `AsyncPath`) since
+a sync method over coroutine members returns un-awaited coroutines.
 
 ## Conventions specific to this repo (do not regress)
 
