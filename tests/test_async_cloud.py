@@ -20,8 +20,12 @@ from fsspec.implementations.memory import MemoryFileSystem  # noqa: E402
 
 from bagof.paths import AsyncPath, Path, UnsupportedPathOperation  # noqa: E402
 from bagof.paths._async_fsspec import (  # noqa: E402
+    _FS_BY_LOOP,
     AsyncFSPath,
+    _as_timestamp,
     _freeze,
+    _stat_from_info,
+    _sweep_closed_loops,
     is_async_filesystem,
 )
 
@@ -375,6 +379,243 @@ def test_resolve_and_absolute() -> None:
         return r == p, a == p
 
     assert _run(go()) == (True, True)
+
+
+# -- restored surface (Fable B2) --------------------------------------------
+def test_stat_touch_and_storage_options() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/s/f.txt")
+        await p.touch()  # creates empty
+        existed = await p.exists()
+        await p.write_bytes(b"12345")
+        st = await p.stat()
+        return existed, st.st_size
+
+    existed, size = _run(go())
+    assert existed is True
+    assert size == 5
+
+
+def test_storage_options_accessor() -> None:
+    p = AsyncPath("memasync://b/k", storage_options={"marker": "v"})
+    assert p.storage_options == {"marker": "v"}
+
+
+def test_lexical_relative_to_does_not_raise() -> None:
+    # relative_to / is_relative_to are pure-path: they must never reach for a
+    # filesystem, and must not raise UnsupportedPathOperation.
+    p = AsyncPath("memasync://bucket/a/b/c.txt")
+    base = AsyncPath("memasync://bucket/a")
+    assert p.is_relative_to(base) is True
+    assert str(p.relative_to(base)) in ("b/c.txt", "memasync://b/c.txt")
+    assert p.as_uri() == "memasync://bucket/a/b/c.txt"
+
+
+# -- open() correctness (Fable M1) ------------------------------------------
+def test_open_plus_mode_is_refused() -> None:
+    async def go() -> object:
+        with pytest.raises(UnsupportedPathOperation):
+            await AsyncPath("memasync://b/rw.txt").open("r+")
+        return True
+
+    assert _run(go()) is True
+
+
+def test_open_exclusive_refuses_existing() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/excl.txt")
+        await p.write_bytes(b"z")
+        with pytest.raises(FileExistsError):
+            await p.open("x")
+        return True
+
+    assert _run(go()) is True
+
+
+def test_open_forwards_encoding() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/enc2.txt")
+        async with await p.open("w", encoding="latin-1") as fh:
+            await fh.write("café")
+        async with await p.open("r", encoding="latin-1") as fh:
+            return await fh.read()
+
+    assert _run(go()) == "café"
+
+
+# -- target handling (Fable M2/M3/M4) ---------------------------------------
+def test_bare_name_rename_stays_in_same_directory() -> None:
+    async def go() -> object:
+        src = AsyncPath("memasync://b/dir/src.txt")
+        await src.write_bytes(b"x")
+        moved = await src.rename("dest.txt")  # bare name = same directory
+        return str(moved), await AsyncPath("memasync://b/dir/dest.txt").exists()
+
+    moved_str, exists = _run(go())
+    assert moved_str == "memasync://b/dir/dest.txt"
+    assert exists is True
+
+
+def test_cross_scheme_target_is_refused() -> None:
+    async def go() -> object:
+        src = AsyncPath("memasync://b/x.txt")
+        await src.write_bytes(b"x")
+        for call in (
+            src.copy("s3://other/y.txt"),
+            src.rename("s3://other/y.txt"),
+            src.copy_into("gs://other/dir"),
+        ):
+            with pytest.raises(ValueError):
+                await call
+        return True
+
+    assert _run(go()) is True
+
+
+# -- resolve / walk order ---------------------------------------------------
+def test_resolve_collapses_dotdot() -> None:
+    async def go() -> object:
+        p = AsyncPath("memasync://b/w/sub/../other.txt")
+        r = await p.resolve()
+        return str(r)
+
+    assert _run(go()) == "memasync://b/w/other.txt"
+
+
+def test_resolve_strict_raises_on_missing() -> None:
+    async def go() -> object:
+        with pytest.raises(FileNotFoundError):
+            await AsyncPath("memasync://b/nope.txt").resolve(strict=True)
+        return True
+
+    assert _run(go()) is True
+
+
+def test_walk_bottom_up() -> None:
+    async def go() -> object:
+        await AsyncPath("memasync://b/wb/a.txt").write_bytes(b"z")
+        await AsyncPath("memasync://b/wb/sub/b.txt").write_bytes(b"z")
+        names = []
+        async for path, _dirs, _files in AsyncPath(
+            "memasync://b/wb"
+        ).walk(top_down=False):
+            names.append(path.name)
+        # bottom-up: the child directory is visited before its parent
+        return names.index("sub") < names.index("wb")
+
+    assert _run(go()) is True
+
+
+# -- misc guards ------------------------------------------------------------
+def test_write_bytes_rejects_int() -> None:
+    async def go() -> object:
+        with pytest.raises(TypeError):
+            await AsyncPath("memasync://b/i.txt").write_bytes(5)
+        return True
+
+    assert _run(go()) is True
+
+
+def test_sweep_closed_loops_drops_dead_entries() -> None:
+    loop = asyncio.new_event_loop()
+    loop.close()
+    _FS_BY_LOOP[loop] = {"marker": object()}
+    _sweep_closed_loops()
+    assert loop not in _FS_BY_LOOP
+
+
+def test_stat_helpers() -> None:
+    import datetime
+
+    assert _as_timestamp(1234.5) == 1234.5
+    assert _as_timestamp(None) == 0.0
+    when = datetime.datetime(2020, 1, 1, tzinfo=datetime.timezone.utc)
+    assert _as_timestamp(when) == when.timestamp()
+    st = _stat_from_info({"size": 9, "type": "directory", "mtime": 100})
+    assert st.st_size == 9
+    assert st.st_mtime == 100
+
+
+def test_with_segments_url_rebuilds_absolute() -> None:
+    p = AsyncFSPath.from_url("memasync://b/x.txt", "memasync", {})
+    rebuilt = p.with_segments("memasync://b/deep/y.txt")
+    assert rebuilt.path == "/b/deep/y.txt"
+
+
+def test_relative_to_string_and_negative() -> None:
+    p = AsyncPath("memasync://bucket/a/b/c.txt")
+    assert p.is_relative_to("memasync://bucket/a") is True
+    assert p.is_relative_to("memasync://other/a") is False
+    # a bare (scheme-less) string is taken as a relative path
+    assert p.is_relative_to("not-a-prefix") is False
+
+
+def test_mkdir_variants() -> None:
+    async def go() -> object:
+        d = AsyncPath("memasync://b/mk")
+        await d.mkdir(parents=True)
+        # exist_ok=True on an existing dir is a no-op
+        await d.mkdir(exist_ok=True)
+        # exist_ok=False on an existing dir raises
+        raised = False
+        try:
+            await d.mkdir()
+        except FileExistsError:
+            raised = True
+        # a non-recursive mkdir of a fresh child works
+        await (d / "child").mkdir()
+        return raised, await (d / "child").exists()
+
+    assert _run(go()) == (True, True)
+
+
+def test_copy_into_url_and_relative_dir() -> None:
+    async def go() -> object:
+        src = AsyncPath("memasync://b/ci/a.txt")
+        await src.write_bytes(b"1")
+        # a URL-string directory
+        u = await src.copy_into("memasync://b/ci/urldst")
+        # a relative directory (resolved against the parent)
+        r = await src.copy_into("reldst")
+        return (
+            await AsyncPath("memasync://b/ci/urldst/a.txt").read_bytes(),
+            u.name,
+            await AsyncPath("memasync://b/ci/reldst/a.txt").read_bytes(),
+            r.name,
+        )
+
+    assert _run(go()) == (b"1", "a.txt", b"1", "a.txt")
+
+
+def test_freeze_distinguishes_equal_repr_objects() -> None:
+    class _Creds:
+        def __repr__(self) -> str:
+            return "<Creds>"
+
+    a, b = _Creds(), _Creds()
+    # Equal reprs must NOT collide, or one caller gets another's filesystem.
+    assert _freeze({"c": a}) != _freeze({"c": b})
+    # A list and a tuple with equal contents are kept distinct.
+    assert _freeze([1, 2]) != _freeze((1, 2))
+
+
+def test_preferred_driver_beats_async_selection() -> None:
+    from bagof.paths import register_protocol
+    from bagof.paths._protocols import _PROTOCOLS
+
+    class _Pref:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def __fspath__(self) -> str:
+            return self.text
+
+    try:
+        register_protocol("memasync", driver=_Pref)
+        p = AsyncPath("memasync://b/k")
+        assert isinstance(p.wrapped, _Pref)
+    finally:
+        _PROTOCOLS.pop("memasync", None)
 
 
 # -- identity ---------------------------------------------------------------

@@ -128,11 +128,18 @@ Two things are load-bearing:
   fsspec's instance cache is keyed by options and thread, not by loop, so a
   session built under one loop is dead under another (verified: two
   `asyncio.run` calls get the same cached instance). `_resolve_fs` keys a
-  cache on `asyncio.get_running_loop()` (weak, so a finished loop's session is
-  collectable), builds with `asynchronous=True, skip_instance_cache=True`
-  (mandatory, or fsspec's cache undoes the per-loop keying; no `loop=` is
-  passed), and `await`s `set_session()` only when the attribute exists
-  (s3fs/HTTP-specific, absent on the base).
+  cache on `asyncio.get_running_loop()`, builds with `asynchronous=True,
+  skip_instance_cache=True` (mandatory, or fsspec's cache undoes the per-loop
+  keying; no `loop=` is passed), holds a per-loop `asyncio.Lock` so a startup
+  fan-out builds one filesystem rather than N, and `await`s `set_session()`
+  only when the attribute exists (s3fs/HTTP-specific, absent on the base).
+  The cache is weak on the loop, but a backend's aiohttp session captures the
+  loop and keeps it alive, so the weak key never fires for exactly the
+  session-holding backends -- `_sweep_closed_loops` on each resolve drops
+  entries whose loop has closed. The options cache key comes from `_freeze`,
+  which falls back to an object's **identity** (not its `repr`) for an
+  unhashable leaf, so two distinct credential objects never collide onto one
+  filesystem.
 - **fsspec is imported lazily**, inside functions, so importing the module (and
   the package) never imports fsspec -- the dependency-free core still imports
   on the 3.8 floor.

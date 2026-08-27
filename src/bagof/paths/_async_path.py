@@ -179,6 +179,12 @@ def _maybe_async_driver(
     scheme = match.group(1).lower()
     if scheme in LOCAL_PROTOCOLS:
         return None
+    from ._protocols import traits_for
+
+    if traits_for(scheme).driver is not None:
+        # A registered preferred driver wins over the async default, matching
+        # the documented selection order.
+        return None
     from . import _async_fsspec as fsspec_driver
 
     if not fsspec_driver.is_async_filesystem(scheme):
@@ -599,7 +605,11 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         """
         method = self._native_method("walk")
         if method is not None:
-            iterator = method()
+            kw = (
+                {"top_down": top_down}
+                if _accepts_kw(method, "top_down") else {}
+            )
+            iterator = method(**kw)
             if inspect.isawaitable(iterator):
                 iterator = await iterator
             if hasattr(iterator, "__aiter__"):
@@ -638,10 +648,16 @@ class AsyncPath(PurePathMixin, BaseWrapper):
 
     async def rename(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target`` and return the new path."""
+        method = self._native_method("rename")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target)))
         return await self._call("rename", (self._coerce_target(target),))
 
     async def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target``, replacing any existing file."""
+        method = self._native_method("replace")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target)))
         return await self._call("replace", (self._coerce_target(target),))
 
     # -- permissions and ownership -----------------------------------------

@@ -27,28 +27,48 @@ from __future__ import annotations
 import asyncio
 import inspect
 import io
+import os
+import posixpath
+import stat as _statmod
 import weakref
 from pathlib import PurePosixPath
 
 import typing_extensions as tx
+
+from ._errors import UnsupportedPathOperation
 
 # loop -> {(scheme, options-token): AsyncFileSystem}. Weak on the loop so a
 # finished loop's filesystem (and any session it holds) becomes collectable.
 _FS_BY_LOOP: weakref.WeakKeyDictionary[tx.Any, tx.Dict[tx.Any, tx.Any]] = (
     weakref.WeakKeyDictionary()
 )
+# A per-loop cache holds its build lock under this sentinel key, apart from
+# the (scheme, options-token) keys that map to filesystems.
+_LOCK_KEY = object()
 
 
 def _freeze(value: tx.Any) -> tx.Any:
-    """A hashable stand-in for storage options, for use as a cache key."""
+    """A hashable stand-in for storage options, for use as a cache key.
+
+    Distinct-but-equal-``repr`` objects (two credential objects, say) must
+    not collide, or one caller would be handed a filesystem built for
+    another's credentials -- so an unhashable leaf falls back to its
+    *identity*, which only ever causes a cache miss (a fresh, correct
+    filesystem), never a wrong-store hit. A list and a tuple are tagged
+    apart, and dict keys are sorted by type-then-repr so a mixed-key dict
+    does not raise.
+    """
     if isinstance(value, dict):
-        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+        items = sorted(
+            value.items(), key=lambda kv: (type(kv[0]).__name__, repr(kv[0]))
+        )
+        return ("dict", tuple((k, _freeze(v)) for k, v in items))
     if isinstance(value, (list, tuple)):
-        return tuple(_freeze(v) for v in value)
+        return (type(value).__name__, tuple(_freeze(v) for v in value))
     try:
         hash(value)
     except TypeError:
-        return repr(value)
+        return ("__id__", id(value))
     return value
 
 
@@ -86,10 +106,58 @@ def _strip(scheme: str, url: str) -> str:
         return url.split("://", 1)[1] if "://" in url else url
 
 
+def _sweep_closed_loops() -> None:
+    """Drop cache entries whose loop has closed.
+
+    The cache is weak on the loop, but a backend's session (aiohttp, on
+    s3fs/HTTP) captures the loop, so the value keeps the key alive and the
+    weak reference never fires. Sweeping closed loops here -- on the next
+    resolve -- releases the filesystem so its session can be finalized.
+    """
+    for loop in list(_FS_BY_LOOP.keys()):
+        if loop.is_closed():
+            _FS_BY_LOOP.pop(loop, None)
+
+
+def _as_timestamp(value: tx.Any) -> float:
+    """A POSIX timestamp from an fsspec mtime (number, datetime, or none)."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    stamp = getattr(value, "timestamp", None)
+    if callable(stamp):
+        try:
+            return float(stamp())
+        except Exception:  # pragma: no cover - exotic mtime types
+            return 0.0
+    return 0.0
+
+
+def _stat_from_info(info: tx.Mapping[str, tx.Any]) -> os.stat_result:
+    """An ``os.stat_result`` synthesized from an fsspec info dict.
+
+    Only size, type and modification time are meaningful on an object store;
+    the rest are zero, as they are on ``UPath``'s own synthesized stat.
+    """
+    size = int(info.get("size") or 0)
+    is_dir = info.get("type") == "directory"
+    mode = (_statmod.S_IFDIR | 0o755) if is_dir else (_statmod.S_IFREG | 0o644)
+    mtime = _as_timestamp(
+        info.get("mtime")
+        or info.get("LastModified")
+        or info.get("last_modified")
+        or info.get("created")
+        or 0
+    )
+    return os.stat_result(
+        (mode, 0, 0, 0, 0, 0, size, mtime, mtime, mtime)
+    )
+
+
 async def _resolve_fs(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
     """The async filesystem for this scheme on the running loop."""
     import fsspec
 
+    _sweep_closed_loops()
     loop = asyncio.get_running_loop()
     per_loop = _FS_BY_LOOP.get(loop)
     if per_loop is None:
@@ -97,22 +165,40 @@ async def _resolve_fs(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
         _FS_BY_LOOP[loop] = per_loop
     token = (scheme, _freeze(dict(options)))
     fs = per_loop.get(token)
-    if fs is None:
-        # asynchronous=True runs coroutines on the awaiting loop (no loop= to
-        # pass); skip_instance_cache=True is mandatory, or fsspec's own cache
-        # (keyed by options and thread, not loop) would hand back a filesystem
-        # bound to a different loop's session.
-        fs = fsspec.filesystem(
-            scheme, asynchronous=True, skip_instance_cache=True, **options
-        )
-        # s3fs/HTTP need their aiohttp session started on this loop; the base
-        # AsyncFileSystem has no set_session, so only call it when present.
-        set_session = getattr(fs, "set_session", None)
-        if set_session is not None:  # pragma: no cover - s3fs/HTTP only
-            result = set_session()
-            if inspect.isawaitable(result):
-                await result
-        per_loop[token] = fs
+    if fs is not None:
+        return fs
+    # One build per (loop, token): without this, a startup gather of N first
+    # operations would build N filesystems (and N sessions). setdefault-style
+    # lock creation is race-free because there is no await between the get and
+    # the assignment.
+    lock = per_loop.get(_LOCK_KEY)
+    if lock is None:
+        lock = per_loop[_LOCK_KEY] = asyncio.Lock()
+    async with lock:
+        fs = per_loop.get(token)
+        if fs is None:
+            # asynchronous=True runs coroutines on the awaiting loop (no loop=
+            # to pass); skip_instance_cache=True is mandatory, or fsspec's own
+            # cache (keyed by options and thread, not loop) would hand back a
+            # filesystem bound to a different loop's session.
+            # We set asynchronous/skip_instance_cache ourselves; drop them
+            # from the user options so they do not collide.
+            safe = {
+                k: v for k, v in options.items()
+                if k not in ("asynchronous", "skip_instance_cache")
+            }
+            fs = fsspec.filesystem(
+                scheme, asynchronous=True, skip_instance_cache=True, **safe
+            )
+            # s3fs/HTTP need their aiohttp session started on this loop; the
+            # base AsyncFileSystem has no set_session, so only call it when
+            # present.
+            set_session = getattr(fs, "set_session", None)
+            if set_session is not None:  # pragma: no cover - s3fs/HTTP only
+                result = set_session()
+                if inspect.isawaitable(result):
+                    await result
+            per_loop[token] = fs
     return fs
 
 
@@ -121,49 +207,45 @@ class _AsyncFSFile:
 
     fsspec's own ``open_async`` is per-backend and refuses text modes, so the
     read/write surface is synthesized: a read loads the object once, a write
-    buffers and is flushed to the store on close.
+    buffers and is flushed to the store on close. The buffer is a ``StringIO``
+    in text mode and a ``BytesIO`` in binary mode, so a chunked text read
+    never splits a multi-byte character.
     """
 
     def __init__(
         self,
         fs: tx.Any,
         path: str,
-        buffer: io.BytesIO,
+        buffer: tx.Any,
         *,
         writable: bool,
         text: bool,
-        encoding: tx.Optional[str],
-        errors: tx.Optional[str],
-        newline: tx.Optional[str],
+        encoding: str,
+        errors: str,
     ) -> None:
         self._fs = fs
         self._path = path
         self._buffer = buffer
         self._writable = writable
         self._text = text
-        self._encoding = encoding or "utf-8"
-        self._errors = errors or "strict"
-        self._newline = newline
-
-    def _decode(self, data: bytes) -> str:
-        return data.decode(self._encoding, self._errors)
+        self._encoding = encoding
+        self._errors = errors
 
     async def read(self, *args: tx.Any) -> tx.Any:
-        data = self._buffer.read(*args)
-        return self._decode(data) if self._text else data
+        return self._buffer.read(*args)
 
     async def readline(self, *args: tx.Any) -> tx.Any:
-        line = self._buffer.readline(*args)
-        return self._decode(line) if self._text else line
+        return self._buffer.readline(*args)
 
     async def write(self, data: tx.Any) -> int:
-        if self._text:
-            data = data.encode(self._encoding, self._errors)
         return self._buffer.write(data)
 
     async def flush(self) -> None:
         if self._writable:
-            await self._fs._pipe_file(self._path, self._buffer.getvalue())
+            data = self._buffer.getvalue()
+            if self._text:
+                data = data.encode(self._encoding, self._errors)
+            await self._fs._pipe_file(self._path, data)
 
     async def aclose(self) -> None:
         await self.flush()
@@ -203,6 +285,12 @@ class AsyncFSPath:
     @property
     def path(self) -> str:
         return self._path
+
+    @property
+    def storage_options(self) -> tx.Dict[str, tx.Any]:
+        # The live connection mapping, matching the documented accessor: it
+        # returns any credentials the path was built with.
+        return self._options
 
     def __str__(self) -> str:
         # Match UPath's spelling: scheme://<path without a leading slash>.
@@ -272,8 +360,32 @@ class AsyncFSPath:
     def as_posix(self) -> str:
         return self._pure.as_posix()
 
+    def as_uri(self) -> str:
+        return str(self)
+
     def is_absolute(self) -> bool:
         return self._pure.is_absolute()
+
+    def _other_pure(self, other: tx.Any) -> PurePosixPath:
+        if isinstance(other, AsyncFSPath):
+            return other._pure
+        text = str(other)
+        if "://" in text:
+            return PurePosixPath(_strip(self._scheme, text))
+        return PurePosixPath(text)
+
+    def relative_to(self, other: tx.Any, walk_up: bool = False) -> AsyncFSPath:
+        base = self._other_pure(other)
+        if walk_up:
+            return self._derive(self._pure.relative_to(base, walk_up=True))
+        return self._derive(self._pure.relative_to(base))
+
+    def is_relative_to(self, other: tx.Any) -> bool:
+        try:
+            self._pure.relative_to(self._other_pure(other))
+            return True
+        except ValueError:
+            return False
 
     # -- filesystem access --------------------------------------------------
     async def _fs(self) -> tx.Any:
@@ -299,6 +411,17 @@ class AsyncFSPath:
         fs = await self._fs()
         return (await self._kind(fs)) == "directory"
 
+    async def stat(self, **_: tx.Any) -> os.stat_result:
+        fs = await self._fs()
+        return _stat_from_info(await fs._info(self._path))
+
+    async def touch(self, **_: tx.Any) -> None:
+        # Create an empty object when absent; an object store cannot bump the
+        # modification time of one that exists, so that case is a no-op.
+        fs = await self._fs()
+        if not await fs._exists(self._path):
+            await fs._pipe_file(self._path, b"")
+
     # -- reading and writing ------------------------------------------------
     async def read_bytes(self) -> bytes:
         fs = await self._fs()
@@ -315,7 +438,9 @@ class AsyncFSPath:
 
     async def write_bytes(self, data: tx.Any) -> int:
         fs = await self._fs()
-        payload = bytes(data)
+        # memoryview rejects an int (as pathlib does), so write_bytes(5) is a
+        # TypeError rather than five NUL bytes.
+        payload = bytes(memoryview(data))
         await fs._pipe_file(self._path, payload)
         return len(payload)
 
@@ -330,19 +455,40 @@ class AsyncFSPath:
         await self.write_bytes(encoded)
         return len(data)
 
-    async def open(self, mode: str = "r", **_: tx.Any) -> _AsyncFSFile:
+    async def open(
+        self,
+        mode: str = "r",
+        buffering: int = -1,
+        encoding: tx.Optional[str] = None,
+        errors: tx.Optional[str] = None,
+        newline: tx.Optional[str] = None,
+        **_: tx.Any,
+    ) -> _AsyncFSFile:
+        if "+" in mode:
+            raise UnsupportedPathOperation(
+                "open(mode='+')",
+                driver=self,
+                hint="read-write mode is not supported on an async cloud path",
+            )
         fs = await self._fs()
         text = "b" not in mode
         writable = any(flag in mode for flag in ("w", "a", "x"))
-        if writable:
-            buffer = io.BytesIO()
-            if "a" in mode and await fs._exists(self._path):
-                buffer.write(await fs._cat_file(self._path))
+        enc = encoding or "utf-8"
+        err = errors or "strict"
+        if "x" in mode and await fs._exists(self._path):
+            raise FileExistsError(str(self))
+        raw = b""
+        if not writable or ("a" in mode and await fs._exists(self._path)):
+            raw = await fs._cat_file(self._path)
+        if text:
+            buffer: tx.Any = io.StringIO(raw.decode(enc, err))
         else:
-            buffer = io.BytesIO(await fs._cat_file(self._path))
+            buffer = io.BytesIO(raw)
+        if "a" in mode:
+            buffer.seek(0, io.SEEK_END)
         return _AsyncFSFile(
             fs, self._path, buffer, writable=writable, text=text,
-            encoding=None, errors=None, newline=None,
+            encoding=enc, errors=err,
         )
 
     # -- directory iteration ------------------------------------------------
@@ -370,8 +516,17 @@ class AsyncFSPath:
     # -- creation / removal -------------------------------------------------
     async def mkdir(self, **kwargs: tx.Any) -> None:
         fs = await self._fs()
+        parents = bool(kwargs.get("parents", False))
         exist_ok = bool(kwargs.get("exist_ok", False))
-        await fs._makedirs(self._path, exist_ok=exist_ok)
+        if await fs._exists(self._path):
+            if exist_ok:
+                return
+            raise FileExistsError(str(self))
+        if parents:
+            await fs._makedirs(self._path, exist_ok=True)
+        else:
+            # parents=False must not silently create intermediates.
+            await fs._mkdir(self._path, create_parents=False)
 
     async def unlink(self, *, missing_ok: bool = False) -> None:
         fs = await self._fs()
@@ -416,15 +571,23 @@ class AsyncFSPath:
     async def absolute(self) -> AsyncFSPath:
         return self
 
-    async def resolve(self, **_: tx.Any) -> AsyncFSPath:
-        # A remote path is already absolute; there are no symlinks to resolve.
-        return self
+    async def resolve(self, strict: bool = False, **_: tx.Any) -> AsyncFSPath:
+        # A remote path has no symlinks, but ``..`` is still collapsed (so the
+        # result compares equal to the normalized spelling), and strict still
+        # means the path must exist.
+        normalized = posixpath.normpath(self._path)
+        result = self if normalized == self._path else self._child(normalized)
+        if strict:
+            fs = await self._fs()
+            if not await fs._exists(result._path):
+                raise FileNotFoundError(str(result))
+        return result
 
     async def walk(
-        self, *args: tx.Any, **kwargs: tx.Any
+        self, top_down: bool = True, *args: tx.Any, **kwargs: tx.Any
     ) -> tx.AsyncIterator[tx.Tuple[AsyncFSPath, tx.List[str], tx.List[str]]]:
         fs = await self._fs()
-        result = fs._walk(self._path)
+        result = fs._walk(self._path, topdown=top_down)
         if inspect.isawaitable(result):
             result = await result
         if hasattr(result, "__aiter__"):  # pragma: no cover - real async _walk
@@ -434,12 +597,23 @@ class AsyncFSPath:
             for root, dirs, files in result:
                 yield self._child(root), list(dirs), list(files)
 
+    def _check_scheme(self, scheme: str) -> None:
+        from ._protocols import canonical_scheme
+
+        if canonical_scheme(scheme) != canonical_scheme(self._scheme):
+            raise ValueError(
+                f"a target of scheme {scheme!r} names a different store; "
+                "pass a path of the same scheme"
+            )
+
     def _as_fs_path(self, target: tx.Any) -> str:
         """A move/copy target as a filesystem path for this backend."""
         if isinstance(target, AsyncFSPath):
+            self._check_scheme(target._scheme)
             return target._path
         text = str(target)
         if "://" in text:
+            self._check_scheme(text.split("://", 1)[0])
             return _strip(self._scheme, text)
         # A bare name is resolved against this path's parent, like pathlib.
         return str(self._pure.parent / text)
@@ -447,6 +621,14 @@ class AsyncFSPath:
     def _into(self, target_dir: tx.Any) -> AsyncFSPath:
         """This path's name placed inside ``target_dir`` (for *_into)."""
         if isinstance(target_dir, AsyncFSPath):
+            self._check_scheme(target_dir._scheme)
             return target_dir._derive(target_dir._pure / self._pure.name)
-        base = PurePosixPath(str(target_dir))
-        return self._child(str(base / self._pure.name))
+        text = str(target_dir)
+        if "://" in text:
+            self._check_scheme(text.split("://", 1)[0])
+            base = AsyncFSPath.from_url(text, self._scheme, self._options)
+            return base._derive(base._pure / self._pure.name)
+        directory = PurePosixPath(text)
+        if not directory.is_absolute():
+            directory = self._pure.parent / directory
+        return self._child(str(directory / self._pure.name))
