@@ -378,3 +378,117 @@ def test_walk_bottom_up_and_on_error(tmp_path: pathlib.Path) -> None:
     errors = []
     list((root / "nope").walk(on_error=lambda e: errors.append(e)))
     assert errors  # iterdir on a missing dir routed to on_error
+
+
+# -- the walk fallback, exercised on a driver without a native walk ---------
+# stdlib pathlib grew walk() in 3.12, so on newer interpreters the real Path
+# takes the native branch and the synthesized fallback is never reached.
+# _NoWalk has iterdir() but no walk(), so it drives the fallback on every
+# interpreter -- the same code path an unknown driver or old pathlib uses.
+class _NoWalk(os.PathLike):
+    """A driver with iterdir() but no native walk()."""
+
+    def __init__(self, real: pathlib.Path) -> None:
+        self._real = pathlib.Path(real)
+
+    def __fspath__(self) -> str:
+        return os.fspath(self._real)
+
+    def __str__(self) -> str:
+        return str(self._real)
+
+    def __truediv__(self, other: object) -> "_NoWalk":
+        return _NoWalk(self._real / other)
+
+    def iterdir(self) -> object:
+        return (_NoWalk(p) for p in self._real.iterdir())
+
+    def is_dir(self, follow_symlinks: bool = True) -> bool:
+        return self._real.is_dir()
+
+    def is_symlink(self) -> bool:
+        return self._real.is_symlink()
+
+    @property
+    def name(self) -> str:
+        return self._real.name
+
+
+def test_walk_fallback_top_down(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "a.txt").touch()
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.txt").touch()
+    seen = {}
+    for dirpath, dirnames, filenames in Path(_NoWalk(tmp_path)).walk():
+        assert isinstance(dirpath, Path)
+        seen[str(dirpath)] = (sorted(dirnames), sorted(filenames))
+    assert seen[str(tmp_path)] == (["sub"], ["a.txt"])
+    assert seen[str(sub)] == ([], ["b.txt"])
+
+
+def test_walk_fallback_bottom_up(tmp_path: pathlib.Path) -> None:
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "f.txt").touch()
+    order = [str(dp) for dp, _dn, _fn in Path(_NoWalk(tmp_path)).walk(
+        top_down=False
+    )]
+    assert order[-1] == str(tmp_path)  # root last, bottom-up
+
+
+def test_walk_fallback_on_error(tmp_path: pathlib.Path) -> None:
+    errors = []
+    list(Path(_NoWalk(tmp_path / "nope")).walk(
+        on_error=lambda e: errors.append(e)
+    ))
+    assert errors  # iterdir on a missing dir routed to on_error
+
+
+@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlink support")
+def test_walk_fallback_symlinked_dir_is_a_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "f.txt").touch()
+    (real / "loop").symlink_to(real, target_is_directory=True)
+    entries = list(Path(_NoWalk(real)).walk(follow_symlinks=False))
+    assert len(entries) == 1  # cycle not descended
+    _dp, dirnames, filenames = entries[0]
+    assert dirnames == []
+    assert sorted(filenames) == ["f.txt", "loop"]  # symlinked dir as a file
+
+
+def test_walk_native_forwards_follow_symlinks(tmp_path: pathlib.Path) -> None:
+    # The native-walk branch forwards follow_symlinks only when True.
+    (tmp_path / "a.txt").touch()
+    rows = list(Path(tmp_path).walk(follow_symlinks=True))
+    assert any(fn for _dp, _dn, fn in rows)
+
+
+# -- the generic recursive-rmdir refusal on a non-local driver --------------
+def test_generic_recursive_rmdir_nonlocal_raises() -> None:
+    class _CloudishDir(os.PathLike):
+        protocol = "s3"
+
+        def __fspath__(self) -> str:
+            return "s3://b/k"
+
+        def __str__(self) -> str:
+            return "s3://b/k"
+
+        def rmdir(self) -> None:
+            pass
+
+    with pytest.raises(UnsupportedPathOperation):
+        Path(_CloudishDir()).rmdir(recursive=True)
+
+
+def test_move_directory_without_replace(tmp_path: pathlib.Path) -> None:
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "f.txt").write_text("x")
+    Path(_NoReplace(src)).move(tmp_path / "dst")
+    assert (tmp_path / "dst" / "f.txt").read_text() == "x"
+    assert not src.exists()  # dir source removed via recursive rmdir
