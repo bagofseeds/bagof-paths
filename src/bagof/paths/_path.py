@@ -16,20 +16,21 @@ from ._spec import BY_NAME
 class Path(PurePathMixin, BaseWrapper):
     """A path-like object exposed through one uniform, pathlib-style surface.
 
-    Construct one around a path string or any path-like object::
+    Construct one around a path string or any path-like object:
 
-        >>> from bagof.paths import Path
-        >>> p = Path("/data/sets/train.zarr")
-        >>> p.name
-        'train.zarr'
-        >>> p.parent
-        Path('/data/sets')
-        >>> (p / "chunks").suffix
-        ''
+    ```pycon
+    >>> from bagof.paths import Path
+    >>> p = Path("/data/sets/train.zarr")
+    >>> p.name
+    'train.zarr'
+    >>> p.parent
+    Path('/data/sets')
+    >>> (p / "chunks").suffix
+    ''
+    ```
 
     Each member either delegates to the wrapped object, falls back to a
-    synthesized implementation, or raises
-    :class:`~bagof.paths.UnsupportedPathOperation`.
+    synthesized implementation, or raises `UnsupportedPathOperation`.
     """
 
     __slots__ = ()

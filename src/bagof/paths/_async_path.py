@@ -87,12 +87,14 @@ class AsyncFile:
 class AsyncPath(PurePathMixin, BaseWrapper):
     """A path-like object exposed through one uniform, async pathlib surface.
 
+    ```pycon
     >>> import asyncio
     >>> from bagof.paths import AsyncPath
     >>> async def main() -> None:
     ...     p = AsyncPath("/etc/hostname")
     ...     if await p.exists():
     ...         print(await p.read_text())
+    ```
     """
 
     __slots__ = ()
