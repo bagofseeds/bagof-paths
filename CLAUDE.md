@@ -157,7 +157,7 @@ python3 -m venv /tmp/priorart && /tmp/priorart/bin/pip install -q universal-path
 ```
 
 The design records where their behaviours are reconciled and why (see
-`docs/design/path-wrapper.md` §5, the measured divergence table). Where a
+`design/path-wrapper.md` §5, the measured divergence table). Where a
 divergence would silently corrupt data (UPath's recursive `rmdir`,
 cloudpathlib's `unlink(missing_ok=True)` default), the wrapper picks the safe
 answer and there is a regression test for it.

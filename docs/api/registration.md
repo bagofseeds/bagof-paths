@@ -1,7 +1,7 @@
 # Registration and errors
 
-Extension points for teaching the wrapper about new drivers and protocols,
-and the two exceptions the surface raises.
+How to add support for a new URL scheme or a new path library, and the two
+errors these paths can raise.
 
 ## ::: bagof.paths.register_protocol
 

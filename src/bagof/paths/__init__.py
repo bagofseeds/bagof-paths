@@ -1,7 +1,8 @@
-"""A uniform pathlib-style API over pathlib, UPath, and cloud paths.
+"""One path API for local files and the cloud.
 
-The public surface is re-exported here; every implementation module is
-private. See ``docs/design/path-wrapper.md`` for the design.
+Works like ``pathlib.Path`` over a local path, a ``UPath``, a cloud path, or
+any path object. The public names are re-exported here; every other module is
+private.
 """
 
 from ._async_path import AsyncPath
