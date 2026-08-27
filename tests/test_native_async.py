@@ -207,7 +207,10 @@ def test_native_rglob_via_fallback(tmp_path: pathlib.Path) -> None:
     _run(go())
 
 
-@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlink support")
+@pytest.mark.skipif(
+    not hasattr(os, "symlink") or not hasattr(pathlib.Path, "readlink"),
+    reason="needs symlink support and pathlib.readlink (added in 3.9)",
+)
 def test_native_readlink_via_fallback(tmp_path: pathlib.Path) -> None:
     target = tmp_path / "t.txt"
     target.write_text("x")
