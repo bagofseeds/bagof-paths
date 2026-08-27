@@ -75,7 +75,7 @@ class BaseWrapper:
             for a local path or a path object.
         """
         if isinstance(path, str):
-            path = _build_from_string(path, driver, storage_options)
+            path = self._from_string(path, driver, storage_options)
         else:
             if driver is not None:
                 raise TypeError(
@@ -104,6 +104,20 @@ class BaseWrapper:
                 "not Path"
             )
         self._wrapped = path
+
+    def _from_string(
+        self,
+        text: str,
+        driver: tx.Any,
+        storage_options: tx.Optional[tx.Mapping[str, tx.Any]],
+    ) -> tx.Any:
+        """Build the wrapped driver for a URL/path string.
+
+        The default is the shared selection. ``AsyncPath`` overrides this to
+        prefer a natively-async driver for a remote URL before falling back
+        to the shared selection (a synchronous driver run in a thread).
+        """
+        return _build_from_string(text, driver, storage_options)
 
     # -- local-filesystem constructors -------------------------------------
     # home/cwd/from_uri build a fresh path rather than wrap an existing one.
