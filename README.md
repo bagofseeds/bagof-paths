@@ -2,8 +2,8 @@
 
 **One path API for local files and the cloud.**
 
-Hand it a local path or a cloud URL. You get back something that works like
-`pathlib.Path`, whichever kind of path it is.
+Wrap a path or a URL, then use it like `pathlib.Path`. The same code reads a
+local file, an object on S3, or anything the underlying libraries reach.
 
 ```python
 from bagof.paths import Path
@@ -12,9 +12,8 @@ Path("/data/train.zarr")           # a local file
 Path("s3://my-bucket/train.zarr")  # an object on S3
 ```
 
-Both give you the same methods — `read_bytes`, `exists`, `iterdir`, `/`, and
-the rest — so the code that uses them does not have to care where the path
-lives.
+Both give you the same methods: `read_bytes`, `exists`, `iterdir`, `/`, and
+the rest of the `pathlib` surface.
 
 ```pycon
 >>> from bagof.paths import Path
@@ -27,45 +26,48 @@ Path('/data/sets')
 Path('/data/sets/train.zarr/chunks')
 ```
 
-## Install
+## Features
+
+* **One API for every path.** Local files, cloud storage, and unknown
+  backends all use the same methods.
+* **Missing methods are filled in.** When a library lacks a method,
+  `bagof.paths` builds it from simpler ones. It reads text from bytes, and
+  copies a folder by copying its files.
+* **One error to catch.** An operation that cannot work raises a single
+  `UnsupportedPathOperation`, the same for every library.
+* **Async support.** `AsyncPath` gives you the same methods with `await`.
+* **No required dependency.** Local paths use only the standard library.
+
+## Installation
 
 ```sh
-pip install bagof-paths          # local paths, nothing else needed
-pip install bagof-paths[upath]   # add cloud and other remote paths (universal-pathlib)
-pip install bagof-paths[cloud]   # add cloud paths (cloudpathlib)
+pip install bagof-paths          # local paths
+pip install bagof-paths[upath]   # add remote paths via universal-pathlib
+pip install bagof-paths[cloud]   # add cloud paths via cloudpathlib
 ```
 
-Local paths work on their own. To open `s3://`, `gs://`, `az://` and the
-like, install one of the extras above, plus the small library for your store
-(for example `s3fs`, or `cloudpathlib[s3]`).
+A remote store also needs its own library, such as `s3fs` for `s3://` or
+`cloudpathlib[s3]`.
 
-## The same code, wherever the file lives
+## The same code, local or remote
 
-Read a file without knowing, or caring, whether it is local or remote:
+`Path` reads the start of the string to choose a backend. A plain path is a
+local file. A URL uses `universal-pathlib`, or `cloudpathlib` if you have it.
 
 ```python
 from bagof.paths import Path
 
-def load(where: str) -> bytes:
-    return Path(where).read_bytes()
+def load(location: str) -> bytes:
+    return Path(location).read_bytes()
 
 load("/data/train.bin")
 load("s3://my-bucket/train.bin")
 ```
 
-## It fills in the gaps
+## Async
 
-Not every library offers every method. When one is missing, `bagof.paths`
-builds it from the pieces that are there — `read_text` from `read_bytes`,
-copying a folder by copying its files, and so on — so you can count on the
-full set of `pathlib` methods even when the library underneath is smaller.
-
-When a method genuinely cannot work for a given path, you get the same clear
-error every time, instead of a different surprise for each library.
-
-## Async, too
-
-`AsyncPath` gives you the same paths, with `await`:
+`AsyncPath` turns the methods that touch storage into coroutines. The methods
+that only describe a path (`name`, `parent`, `/`) stay synchronous.
 
 ```python
 import asyncio
@@ -79,10 +81,6 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-The parts that only describe a path — its name, its parent, joining with `/` —
-stay plain; only the parts that actually touch storage need `await`.
-
 ## Learn more
 
-See [how it compares](docs/comparison.md) to plain `pathlib`, `UPath`, and
-`AnyPath`.
+See [how it compares](docs/comparison.md) to `pathlib`, `UPath`, and `AnyPath`.
