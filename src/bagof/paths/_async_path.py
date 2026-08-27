@@ -27,14 +27,23 @@ import typing_extensions as tx
 from . import _bridge as bridge
 from . import _engine as engine
 from ._base import BaseWrapper
-from ._constants import LOCAL_PROTOCOLS
+from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
 from ._detect import is_async_driver as _is_async_driver
 from ._errors import UnsupportedPathOperation
 from ._path import Path
+from ._protocols import merged_storage_options
 from ._purepath import PurePathMixin
 from ._spec import BY_NAME
 
 _WALK_DONE = object()
+
+
+def _accepts_kw(func: tx.Any, name: str) -> bool:
+    """Whether ``func`` declares a keyword parameter ``name``."""
+    try:
+        return name in inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return False
 
 
 class AsyncFile:
@@ -149,6 +158,42 @@ async def _adapt_async_file(opened: tx.Any) -> _NativeAsyncFile:
     return _NativeAsyncFile(opened)
 
 
+def _maybe_async_driver(
+    text: str,
+    driver: tx.Any,
+    storage_options: tx.Optional[tx.Mapping[str, tx.Any]],
+) -> tx.Any:
+    """A natively-async driver for a remote URL, or ``None`` to fall back.
+
+    Prefers an fsspec ``AsyncFileSystem`` when the URL names a scheme whose
+    installed backend is natively asynchronous. Returns ``None`` -- so the
+    shared selection runs, wrapping a synchronous driver in a thread -- for an
+    explicit ``driver=``, a local path, an fsspec chain, or a scheme with no
+    async backend installed.
+    """
+    if driver is not None:
+        return None
+    match = SCHEME_RE.match(text)
+    if match is None:
+        return None
+    scheme = match.group(1).lower()
+    if scheme in LOCAL_PROTOCOLS:
+        return None
+    from ._protocols import traits_for
+
+    if traits_for(scheme).driver is not None:
+        # A registered preferred driver wins over the async default, matching
+        # the documented selection order.
+        return None
+    from . import _async_fsspec as fsspec_driver
+
+    if not fsspec_driver.is_async_filesystem(scheme):
+        return None
+    options = merged_storage_options(scheme, storage_options)
+    url = scheme + text[match.end(1):]
+    return fsspec_driver.AsyncFSPath.from_url(url, scheme, options)
+
+
 class AsyncPath(PurePathMixin, BaseWrapper):
     """The ``await`` version of :class:`Path`: the same methods, as coroutines.
 
@@ -173,7 +218,32 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     # thread where the synchronous implementation actually runs.
     _sync_type: tx.ClassVar[tx.Type[Path]] = Path
 
+    # -- selection ---------------------------------------------------------
+    def _from_string(
+        self,
+        text: str,
+        driver: tx.Any,
+        storage_options: tx.Optional[tx.Mapping[str, tx.Any]],
+    ) -> tx.Any:
+        """Prefer a natively-async driver, else the shared selection."""
+        built = _maybe_async_driver(text, driver, storage_options)
+        if built is not None:
+            return built
+        return super()._from_string(text, driver, storage_options)
+
     # -- delegation plumbing ----------------------------------------------
+    def _native_method(self, name: str) -> tx.Any:
+        """The wrapped driver's member, when it is native and implements it.
+
+        The copy/move/rmdir/walk members are not on the spec table, so they
+        do not travel through ``_call``/``_aiter``. This routes them to a
+        native driver directly, leaving the synchronous-view bridge for a
+        driver that lacks them.
+        """
+        if _is_async_driver(self._wrapped):
+            return getattr(self._wrapped, name, None)
+        return None
+
     def _sync(self) -> Path:
         """A synchronous view to run in a thread.
 
@@ -452,6 +522,13 @@ class AsyncPath(PurePathMixin, BaseWrapper):
 
     async def rmdir(self, *, recursive: bool = False) -> None:
         """Remove the directory at the path."""
+        method = self._native_method("rmdir")
+        if method is not None and _accepts_kw(method, "recursive"):
+            # A native driver that models recursion itself (fsspec) takes the
+            # flag directly; one that does not (a plain async path) falls to
+            # the synchronous view, which handles the recursion.
+            await method(recursive=recursive)
+            return
         await bridge.run(self._sync().rmdir, recursive=recursive)
 
     # -- copying and moving ------------------------------------------------
@@ -463,6 +540,9 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         preserve_metadata: bool = False,
     ) -> tx.Self:
         """Copy this file or directory to ``target``; return the new path."""
+        method = self._native_method("copy")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target)))
         return self._wrap(
             await bridge.run(
                 self._sync().copy, target,
@@ -479,6 +559,9 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         preserve_metadata: bool = False,
     ) -> tx.Self:
         """Copy into ``target_dir``, keeping this path's name."""
+        method = self._native_method("copy_into")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target_dir)))
         return self._wrap(
             await bridge.run(
                 self._sync().copy_into, target_dir,
@@ -489,10 +572,16 @@ class AsyncPath(PurePathMixin, BaseWrapper):
 
     async def move(self, target: tx.Any) -> tx.Self:
         """Move this path to ``target``; return the new path."""
+        method = self._native_method("move")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target)))
         return self._wrap(await bridge.run(self._sync().move, target))
 
     async def move_into(self, target_dir: tx.Any) -> tx.Self:
         """Move into ``target_dir``, keeping this path's name."""
+        method = self._native_method("move_into")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target_dir)))
         return self._wrap(
             await bridge.run(self._sync().move_into, target_dir)
         )
@@ -509,7 +598,29 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         One directory per thread hop, so mutating ``dirnames`` in place to
         prune the descent works exactly as it does on the sync wrapper. Note
         that ``on_error`` runs in a worker thread.
+
+        A natively-async driver walks on its own coroutine surface; pruning
+        by editing ``dirnames`` is not propagated there, since the driver
+        produced the whole level before it was yielded.
         """
+        method = self._native_method("walk")
+        if method is not None:
+            kw = (
+                {"top_down": top_down}
+                if _accepts_kw(method, "top_down") else {}
+            )
+            iterator = method(**kw)
+            if inspect.isawaitable(iterator):
+                iterator = await iterator
+            if hasattr(iterator, "__aiter__"):
+                async for row in iterator:
+                    path, dirnames, filenames = row
+                    yield self.with_wrapped(path), dirnames, filenames
+            else:
+                for row in iterator:
+                    path, dirnames, filenames = row
+                    yield self.with_wrapped(path), dirnames, filenames
+            return
         rows = self._sync().walk(top_down, on_error, follow_symlinks)
         while True:
             row = await bridge.run(next, rows, _WALK_DONE)
@@ -537,10 +648,16 @@ class AsyncPath(PurePathMixin, BaseWrapper):
 
     async def rename(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target`` and return the new path."""
+        method = self._native_method("rename")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target)))
         return await self._call("rename", (self._coerce_target(target),))
 
     async def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target``, replacing any existing file."""
+        method = self._native_method("replace")
+        if method is not None:
+            return self.with_wrapped(await method(engine._unwrap(target)))
         return await self._call("replace", (self._coerce_target(target),))
 
     # -- permissions and ownership -----------------------------------------

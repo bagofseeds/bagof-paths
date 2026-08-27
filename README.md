@@ -107,6 +107,10 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+For a cloud store whose library speaks async (such as `s3://` through `s3fs`),
+`AsyncPath` talks to it directly, with no threads. For every other path it runs
+the synchronous driver in a worker thread, so the same code works either way.
+
 ## Learn more
 
 See [how it compares](docs/comparison.md) to `pathlib`, `UPath`, and `AnyPath`.

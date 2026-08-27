@@ -50,6 +50,8 @@ src/bagof/paths/
   _purepath.py   # PurePathMixin: the lexical surface, shared sync by both
   _path.py       # Path: thin, real-signature methods over the engine
   _async_path.py # AsyncPath + AsyncFile: the async surface over the bridge
+  _async_fsspec.py # AsyncFSPath: a native async path over an fsspec
+                 #   AsyncFileSystem (the async cloud driver)
   _bridge.py     # run a blocking callable in the default thread pool
 tests/
   test_import.py, test_identity.py, test_derivation.py
@@ -105,6 +107,55 @@ name would collide.
   once per driver type and cached; a non-local async driver has no local
   view, so a member it lacks raises rather than round-tripping through a cache
   path.
+
+### The native async cloud driver (`_async_fsspec.py`)
+
+`AsyncPath("s3://...")` gets a real coroutine I/O surface, not a synchronous
+driver in a thread, when the scheme's installed fsspec backend is natively
+async. `AsyncFSPath` is a **wrapped driver object** (like a `UPath`), not a
+wrapper: `AsyncPath` holds one and reaches it through the native seam. It
+presents synchronous lexical members (over a `PurePosixPath` of the fs path)
+and coroutine I/O members whose names match the pathlib surface, each mapping
+to fsspec's own async method (`read_bytes`⇐`_cat_file`, `write_bytes`⇐
+`_pipe_file`, `iterdir`⇐`_ls`, `walk`⇐`_walk`, `rmdir`⇐`_rm` with `recursive`
+wired through so a bare `rmdir()` never deletes a tree, `rename`/`move`⇐
+`_mv_file`, `copy`⇐`_cp_file`). `.path` is the backend's own
+`_strip_protocol`, so identity matches `UPath` at the same URL.
+
+Two things are load-bearing:
+
+- **The filesystem is resolved per running event loop**, not captured once.
+  fsspec's instance cache is keyed by options and thread, not by loop, so a
+  session built under one loop is dead under another (verified: two
+  `asyncio.run` calls get the same cached instance). `_resolve_fs` keys a
+  cache on `asyncio.get_running_loop()`, builds with `asynchronous=True,
+  skip_instance_cache=True` (mandatory, or fsspec's cache undoes the per-loop
+  keying; no `loop=` is passed), holds a per-loop `asyncio.Lock` so a startup
+  fan-out builds one filesystem rather than N, and `await`s `set_session()`
+  only when the attribute exists (s3fs/HTTP-specific, absent on the base).
+  The cache is weak on the loop, but a backend's aiohttp session captures the
+  loop and keeps it alive, so the weak key never fires for exactly the
+  session-holding backends -- `_sweep_closed_loops` on each resolve drops
+  entries whose loop has closed. The options cache key comes from `_freeze`,
+  which falls back to an object's **identity** (not its `repr`) for an
+  unhashable leaf, so two distinct credential objects never collide onto one
+  filesystem.
+- **fsspec is imported lazily**, inside functions, so importing the module (and
+  the package) never imports fsspec -- the dependency-free core still imports
+  on the 3.8 floor.
+
+Selection is an overridable hook: `BaseWrapper._from_string` runs the shared
+selection; `AsyncPath._from_string` prefers `AsyncFSPath` for a remote URL
+whose backend is natively async (explicit `driver=` still wins), else falls
+back to today's behavior (a synchronous driver in a thread), so nothing
+regresses when no async backend is installed. The six adapter members
+(`copy`/`copy_into`/`move`/`move_into`/`rmdir`/`walk`) are not on the spec
+table, so `_call`/`_aiter` do not carry them; `AsyncPath` routes them to a
+native driver directly when it has the member, else through the sync-view
+bridge. **Testing** uses an in-process natively-async backend
+(`AsyncFileSystemWrapper` over `MemoryFileSystem`) -- no credentials, no
+network; the true loop/session rebinding only shows against a real backend
+(s3fs/HTTP), which is a documented coverage gap.
 
 ### Adding a member to the surface
 
@@ -234,8 +285,6 @@ walk-fallback and `hardlink_to`-fallback tests) or it reads as uncovered.
   backend installed (today `Path("s3://…")` needs `upath` or `cloudpathlib`).
   The selection availability tail is an error branch it would append to.
 - A **sync-over-async portal** -- `Path` (synchronous) over an async driver,
-  by driving an event loop. (`AsyncPath` over an async driver is done; the
-  reverse is not.) Also an async *cloud* path: no mature async cloud path
-  object exists, so async `s3://` would mean adapting fsspec's
-  `AsyncFileSystem` (filesystem-shaped, not a path).
+  by driving an event loop. (`AsyncPath` over an async driver, including the
+  fsspec cloud driver, is done; the reverse is not.)
 - A **`to()`** converter between drivers.
