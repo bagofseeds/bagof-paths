@@ -33,3 +33,12 @@ ADAPTER_MEMBERS = frozenset(
 
 # Members computed lexically (see _match.py), delegated to neither.
 COMPUTED_MEMBERS = frozenset({"match", "full_match"})
+
+# Driver-specific accessor properties on the base wrapper: present only when
+# the wrapped driver exposes the attribute (see BaseWrapper). Listed here so
+# supports()/capabilities() can answer for them without touching the property
+# (which would raise for a driver that lacks it).
+ACCESSOR_MEMBERS = frozenset({
+    "info", "storage_options", "fs", "bucket", "key",
+    "client", "cloud_prefix", "fspath", "etag",
+})

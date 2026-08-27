@@ -163,6 +163,31 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         """Whether the path and ``other`` refer to the same file."""
         return await bridge.run(self._sync().samefile, other)
 
+    # -- extended status queries -------------------------------------------
+    async def is_mount(self) -> bool:
+        """Whether the path is a mount point."""
+        return await bridge.run(self._sync().is_mount)
+
+    async def is_socket(self) -> bool:
+        """Whether the path is a Unix domain socket."""
+        return await bridge.run(self._sync().is_socket)
+
+    async def is_fifo(self) -> bool:
+        """Whether the path is a FIFO (named pipe)."""
+        return await bridge.run(self._sync().is_fifo)
+
+    async def is_block_device(self) -> bool:
+        """Whether the path is a block device."""
+        return await bridge.run(self._sync().is_block_device)
+
+    async def is_char_device(self) -> bool:
+        """Whether the path is a character device."""
+        return await bridge.run(self._sync().is_char_device)
+
+    async def is_junction(self) -> bool:
+        """Whether the path is a junction (a Windows concept; else False)."""
+        return await bridge.run(self._sync().is_junction)
+
     # -- reading and writing -----------------------------------------------
     async def open(
         self,
@@ -376,3 +401,89 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     async def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to ``target``, replacing any existing file."""
         return self._wrap(await bridge.run(self._sync().replace, target))
+
+    # -- permissions and ownership -----------------------------------------
+    async def chmod(self, mode: int, *, follow_symlinks: bool = True) -> None:
+        """Change the file mode and permission bits."""
+        await bridge.run(
+            self._sync().chmod, mode, follow_symlinks=follow_symlinks
+        )
+
+    async def lchmod(self, mode: int) -> None:
+        """Like :meth:`chmod`, without following symbolic links."""
+        await bridge.run(self._sync().lchmod, mode)
+
+    async def owner(self, *, follow_symlinks: bool = True) -> str:
+        """The login name of the file's owner."""
+        return await bridge.run(
+            self._sync().owner, follow_symlinks=follow_symlinks
+        )
+
+    async def group(self, *, follow_symlinks: bool = True) -> str:
+        """The group name of the file."""
+        return await bridge.run(
+            self._sync().group, follow_symlinks=follow_symlinks
+        )
+
+    # -- links -------------------------------------------------------------
+    async def symlink_to(
+        self, target: tx.Any, target_is_directory: bool = False
+    ) -> None:
+        """Make this path a symbolic link to ``target``."""
+        await bridge.run(
+            self._sync().symlink_to, target,
+            target_is_directory=target_is_directory,
+        )
+
+    async def hardlink_to(self, target: tx.Any) -> None:
+        """Make this path a hard link to ``target``."""
+        await bridge.run(self._sync().hardlink_to, target)
+
+    async def link_to(self, target: tx.Any) -> None:
+        """Make ``target`` a hard link to this path.
+
+        .. deprecated::
+           ``link_to`` takes the *reverse* argument order of
+           :meth:`hardlink_to` and was removed from ``pathlib`` in Python
+           3.12. Prefer :meth:`hardlink_to`; this is kept, and synthesized
+           where the driver dropped it, only for backward compatibility.
+        """
+        await bridge.run(self._sync().link_to, target)
+
+    # -- cloud transfer and cache ------------------------------------------
+    async def as_url(self, **kwargs: tx.Any) -> str:
+        """A URL for the path; keyword arguments pass to the driver."""
+        return await bridge.run(self._sync().as_url, **kwargs)
+
+    async def download_to(self, destination: tx.Any) -> tx.Any:
+        """Download the path's contents to a local ``destination``."""
+        return await bridge.run(self._sync().download_to, destination)
+
+    async def upload_from(self, source: tx.Any, **kwargs: tx.Any) -> tx.Any:
+        """Upload a local ``source`` to the path."""
+        return self._wrap(
+            await bridge.run(self._sync().upload_from, source, **kwargs)
+        )
+
+    async def clear_cache(self) -> None:
+        """Discard any locally cached copy of the path (cloudpathlib)."""
+        await bridge.run(self._sync().clear_cache)
+
+    # -- recursive copy / remove aliases -----------------------------------
+    async def rmtree(self) -> None:
+        """Remove the directory tree at the path. Alias of ``rmdir``."""
+        await self.rmdir(recursive=True)
+
+    async def copytree(
+        self,
+        target: tx.Any,
+        *,
+        follow_symlinks: bool = True,
+        preserve_metadata: bool = False,
+    ) -> tx.Self:
+        """Copy a directory tree to ``target``. Alias of ``copy``."""
+        return await self.copy(
+            target,
+            follow_symlinks=follow_symlinks,
+            preserve_metadata=preserve_metadata,
+        )

@@ -63,6 +63,15 @@ PURE_PATH_MEMBERS = (
         "is_relative_to", fallback="is_relative_to", needs=("relative_to",)
     ),
     Member("relative_to", result=PATH, normalize=(("walk_up", False),)),
+    # with_segments builds a sibling path from string parts; pathlib gained it
+    # in 3.12, so synthesize it from the wrapped type on older interpreters.
+    Member(
+        "with_segments", result=PATH, fallback="with_segments"
+    ),
+    # is_reserved is lexical (Windows device names); delegate-or-raise.
+    Member("is_reserved"),
+    # joinuri joins a URI onto the path (universal-pathlib); delegate-or-raise.
+    Member("joinuri", result=PATH),
     # match / full_match are not delegated: they are computed lexically on the
     # canonical path (see _match.py) so their semantics are identical across
     # drivers and Python versions.
@@ -128,6 +137,47 @@ IO_MEMBERS = (
     Member("readlink", IO, result=PATH),
     Member("rename", IO, result=PATH),
     Member("replace", IO, result=PATH),
+    # -- extended status queries (pathlib/universal-pathlib) ----------------
+    # Special-file and mount tests; delegate-or-raise (a driver without the
+    # concept -- most cloud backends -- reports it as unsupported).
+    Member("is_mount", IO),
+    Member("is_socket", IO),
+    Member("is_fifo", IO),
+    Member("is_block_device", IO),
+    Member("is_char_device", IO),
+    # is_junction is 3.12+/cloud; synthesize False where the concept is absent
+    # so the answer is uniform across drivers and interpreter versions.
+    Member("is_junction", IO, fallback="is_junction"),
+    # -- permissions and ownership ------------------------------------------
+    # follow_symlinks reached pathlib.chmod/owner/group in 3.13; forward it
+    # only when False/non-default so older signatures still accept the call.
+    Member("chmod", IO, normalize=(("follow_symlinks", True),)),
+    # lchmod delegate-or-raise: it cannot be synthesized portably (many
+    # platforms have no lchmod, and chmod's follow_symlinks keyword is 3.10+).
+    Member("lchmod", IO),
+    Member("owner", IO, normalize=(("follow_symlinks", True),)),
+    Member("group", IO, normalize=(("follow_symlinks", True),)),
+    # -- links --------------------------------------------------------------
+    Member(
+        "symlink_to", IO, normalize=(("target_is_directory", False),)
+    ),
+    # hardlink_to synthesizes from os.link for a local driver that lacks it
+    # (stdlib pathlib gained it in 3.10).
+    Member("hardlink_to", IO, fallback="hardlink_to"),
+    # link_to was deprecated in 3.10 and removed in 3.12; kept for backward
+    # compatibility and synthesized from hardlink_to where pathlib dropped it.
+    Member("link_to", IO, fallback="link_to", needs=("hardlink_to",)),
+    # -- cloud transfer and cache (cloudpathlib) ----------------------------
+    # as_url synthesizes from as_uri (a plain URI) where the driver lacks it.
+    # download_to/upload_from/clear_cache are cache operations with no generic
+    # synthesis, so they delegate-or-raise. as_url returns a URL string and
+    # download_to returns a local path (a different driver family), so neither
+    # is re-wrapped; upload_from returns the uploaded path in this driver's
+    # family, so it is re-wrapped like any other path result.
+    Member("as_url", IO, fallback="as_url", needs=("as_uri",)),
+    Member("download_to", IO),
+    Member("upload_from", IO, result=PATH),
+    Member("clear_cache", IO),
 )
 
 MEMBERS = PURE_PATH_MEMBERS + IO_MEMBERS

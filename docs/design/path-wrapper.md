@@ -243,8 +243,13 @@ wired", not "will this call succeed".
   this is a small, well-tested function and shipping a quietly-wrong matcher
   or an arbitrarily-raising one are both worse. Where the driver has a native
   `match`/`full_match`, delegate (UPath and cloudpathlib both do).
-- `joinuri` ⇐ `urljoin(as_uri(), …)`; `as_url` ⇐ `as_uri()` (presigning is
-  driver-native or state 3).
+- `as_url` ⇐ `as_uri()` — a plain URI is the driver-independent URL, so a
+  local path answers `as_url()` with its `file://` URI; presigning and other
+  keyword options are driver-native (a driver that supports them ships its own
+  `as_url`). `joinuri` stays **delegate-or-raise**: `urljoin(as_uri(), …)`
+  yields a bare URL string with no unambiguous way to re-wrap it as a path for
+  a non-URL driver, so it is offered only where the driver (universal-pathlib)
+  implements it.
 
 ---
 
@@ -683,7 +688,21 @@ cannot silently reintroduce them.
    detection, iterator + file adaptation), `test_parity.py`, plus a
    natively-async-driver test leg (`anyio.Path`, user-installed for the
    test only — no package dependency).
-6. **Docs + polish.** mkdocstrings pages, `pycon`-tested examples on the
+6. **Surface parity.** Everything `pathlib`/`UPath`/`cloudpathlib` implement
+   that phases 2–5 did not yet expose: the extended status queries
+   (`is_mount`/`is_socket`/`is_fifo`/`is_block_device`/`is_char_device`/
+   `is_junction`/`is_reserved`), permissions and ownership
+   (`chmod`/`lchmod`/`owner`/`group`), links
+   (`symlink_to`/`hardlink_to`/`link_to`), `with_segments`, the
+   local-filesystem constructors (`home`/`cwd`/`from_uri`), the recursive
+   copy/remove aliases (`copytree`/`rmtree`), the driver-specific accessors
+   (`info`/`storage_options`/`fs`/`bucket`/`key`/`client`/`cloud_prefix`/
+   `fspath`/`etag`), and the cloud transfer/cache members
+   (`as_url`/`download_to`/`upload_from`/`clear_cache`/`joinuri`). Each is
+   delegated, synthesized, or delegate-or-raise on the same spec/engine path
+   as the rest, with the async surface kept in lockstep. Anything left out is
+   still reachable through `path.wrapped`.
+7. **Docs + polish.** mkdocstrings pages, `pycon`-tested examples on the
    oldest supported interpreter, a comparison page vs raw
    `pathlib`/`UPath`/`AnyPath`, `CLAUDE.md`.
 

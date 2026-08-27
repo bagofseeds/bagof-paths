@@ -75,6 +75,31 @@ class Path(PurePathMixin, BaseWrapper):
         """Whether the path and ``other`` refer to the same file."""
         return engine.invoke(self, BY_NAME["samefile"], (other,))
 
+    # -- extended status queries -------------------------------------------
+    def is_mount(self) -> bool:
+        """Whether the path is a mount point."""
+        return engine.invoke(self, BY_NAME["is_mount"])
+
+    def is_socket(self) -> bool:
+        """Whether the path is a Unix domain socket."""
+        return engine.invoke(self, BY_NAME["is_socket"])
+
+    def is_fifo(self) -> bool:
+        """Whether the path is a FIFO (named pipe)."""
+        return engine.invoke(self, BY_NAME["is_fifo"])
+
+    def is_block_device(self) -> bool:
+        """Whether the path is a block device."""
+        return engine.invoke(self, BY_NAME["is_block_device"])
+
+    def is_char_device(self) -> bool:
+        """Whether the path is a character device."""
+        return engine.invoke(self, BY_NAME["is_char_device"])
+
+    def is_junction(self) -> bool:
+        """Whether the path is a junction (a Windows concept; else False)."""
+        return engine.invoke(self, BY_NAME["is_junction"])
+
     # -- reading and writing -----------------------------------------------
     def open(
         self,
@@ -285,4 +310,97 @@ class Path(PurePathMixin, BaseWrapper):
         """Rename the path to ``target``, replacing any existing file."""
         return engine.invoke(
             self, BY_NAME["replace"], (self._coerce_target(target),)
+        )
+
+    # -- permissions and ownership -----------------------------------------
+    def chmod(self, mode: int, *, follow_symlinks: bool = True) -> None:
+        """Change the file mode and permission bits."""
+        return engine.invoke(
+            self, BY_NAME["chmod"], (mode,),
+            {"follow_symlinks": follow_symlinks},
+        )
+
+    def lchmod(self, mode: int) -> None:
+        """Like :meth:`chmod`, without following symbolic links."""
+        return engine.invoke(self, BY_NAME["lchmod"], (mode,))
+
+    def owner(self, *, follow_symlinks: bool = True) -> str:
+        """The login name of the file's owner."""
+        return engine.invoke(
+            self, BY_NAME["owner"], (),
+            {"follow_symlinks": follow_symlinks},
+        )
+
+    def group(self, *, follow_symlinks: bool = True) -> str:
+        """The group name of the file."""
+        return engine.invoke(
+            self, BY_NAME["group"], (),
+            {"follow_symlinks": follow_symlinks},
+        )
+
+    # -- links -------------------------------------------------------------
+    def symlink_to(
+        self, target: tx.Any, target_is_directory: bool = False
+    ) -> None:
+        """Make this path a symbolic link to ``target``."""
+        return engine.invoke(
+            self, BY_NAME["symlink_to"], (target,),
+            {"target_is_directory": target_is_directory},
+        )
+
+    def hardlink_to(self, target: tx.Any) -> None:
+        """Make this path a hard link to ``target``."""
+        return engine.invoke(self, BY_NAME["hardlink_to"], (target,))
+
+    def link_to(self, target: tx.Any) -> None:
+        """Make ``target`` a hard link to this path.
+
+        .. deprecated::
+           ``link_to`` takes the *reverse* argument order of
+           :meth:`hardlink_to` and was removed from ``pathlib`` in Python
+           3.12. Prefer :meth:`hardlink_to`; this is kept, and synthesized
+           where the driver dropped it, only for backward compatibility.
+        """
+        return engine.invoke(self, BY_NAME["link_to"], (target,))
+
+    # -- cloud transfer and cache ------------------------------------------
+    # Driver-specific (cloudpathlib). They delegate or raise, and return the
+    # driver's native result (a URL string, a local destination path).
+    def as_url(self, **kwargs: tx.Any) -> str:
+        """A URL for the path; keyword arguments pass to the driver."""
+        return engine.invoke(self, BY_NAME["as_url"], (), kwargs)
+
+    def download_to(self, destination: tx.Any) -> tx.Any:
+        """Download the path's contents to a local ``destination``."""
+        return engine.invoke(self, BY_NAME["download_to"], (destination,))
+
+    def upload_from(self, source: tx.Any, **kwargs: tx.Any) -> tx.Any:
+        """Upload a local ``source`` to the path."""
+        return engine.invoke(
+            self, BY_NAME["upload_from"], (source,), kwargs
+        )
+
+    def clear_cache(self) -> None:
+        """Discard any locally cached copy of the path (cloudpathlib)."""
+        return engine.invoke(self, BY_NAME["clear_cache"])
+
+    # -- recursive copy / remove aliases -----------------------------------
+    # Familiar names from cloudpathlib and shutil; both route through the
+    # adapter-backed copy / rmdir so their divergence is handled in one place.
+    def rmtree(self) -> None:
+        """Remove the directory tree at the path. Alias of ``rmdir``."""
+        self.rmdir(recursive=True)
+
+    def copytree(
+        self,
+        target: tx.Any,
+        *,
+        follow_symlinks: bool = True,
+        preserve_metadata: bool = False,
+    ) -> tx.Self:
+        """Copy a directory tree to ``target``. Alias of ``copy``."""
+        return self.copy(
+            target,
+            follow_symlinks=follow_symlinks,
+            preserve_metadata=preserve_metadata,
         )
