@@ -64,6 +64,26 @@ load("/data/train.bin")
 load("s3://my-bucket/train.bin")
 ```
 
+## Credentials
+
+Pass connection details with `storage_options`. They go straight to the
+backend.
+
+```python
+from bagof.paths import Path
+
+Path(
+    "s3://my-bucket/train.bin",
+    storage_options={"key": "AKIA...", "secret": "...", "endpoint_url": "..."},
+)
+```
+
+Leave `storage_options` off to use ambient credentials, such as environment
+variables, `~/.aws/config`, or an instance role.
+
+Set defaults once for a scheme with `register_protocol`, and a per-call
+`storage_options` overrides them key by key.
+
 ## Async
 
 `AsyncPath` turns the methods that touch storage into coroutines. The methods

@@ -35,6 +35,7 @@ from ._constants import (
     LOCAL_PROTOCOLS,
     SCHEME_RE,
 )
+from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
 from ._protocols import canonical_scheme, traits_for
 from ._spec import BY_NAME
@@ -51,14 +52,25 @@ class BaseWrapper:
     # same family compare equal (a sync Path never equals an async one).
     _family: tx.ClassVar[str] = "sync"
 
-    def __init__(self, path: tx.Any, *, driver: tx.Any = None) -> None:
+    def __init__(
+        self,
+        path: tx.Any,
+        *,
+        driver: tx.Any = None,
+        storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+    ) -> None:
         if isinstance(path, str):
-            path = _build_from_string(path, driver)
+            path = _build_from_string(path, driver, storage_options)
         else:
             if driver is not None:
                 raise TypeError(
                     "driver= applies only to a URL string; a path object is "
                     "wrapped as it is (its own type is already its driver)"
+                )
+            if storage_options is not None:
+                raise TypeError(
+                    "storage_options= applies only to a URL string; a path "
+                    "object already carries its own connection"
                 )
             if isinstance(path, BaseWrapper):
                 path = path._wrapped
@@ -67,6 +79,14 @@ class BaseWrapper:
                     f"cannot wrap {type(path).__name__!r}; expected a path "
                     "string or a path-like object"
                 )
+        if self._family == "sync" and is_async_driver(path):
+            # A synchronous method over an async driver returns un-awaited
+            # coroutines -- a silent trap. Refuse it at construction.
+            raise UnsupportedPathOperation(
+                "wrap",
+                driver=path,
+                hint="this driver is asynchronous; use AsyncPath, not Path",
+            )
         self._wrapped = path
 
     # -- local-filesystem constructors -------------------------------------
@@ -263,7 +283,11 @@ class BaseWrapper:
 
     @property
     def storage_options(self) -> tx.Any:
-        """The driver's storage options (universal-pathlib/fsspec)."""
+        """The driver's storage options (universal-pathlib/fsspec).
+
+        This is the live connection mapping, so it returns any credentials
+        the path was built with. Treat it as sensitive: it is not redacted.
+        """
         return self._delegate_attr("storage_options")
 
     @property
@@ -370,15 +394,25 @@ class BaseWrapper:
         return self.with_wrapped(other / self._wrapped)
 
 
-def _build_from_string(text: str, driver: tx.Any) -> tx.Any:
+def _build_from_string(
+    text: str,
+    driver: tx.Any,
+    storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+) -> tx.Any:
     """Turn a string into a driver path: local, selected, or via ``driver=``.
 
     An explicit ``driver`` (a path class or ``str -> path`` callable) wins. A
     plain path or a ``file://``/``local://`` URI becomes a stdlib
     ``pathlib.Path``. A remote scheme, or an fsspec chain like
     ``simplecache::s3://...``, is handed to driver selection.
+
+    ``storage_options`` (endpoint, credentials, ...) are forwarded to the
+    driver. They apply only to a remote URL: a local path has nowhere to send
+    them, and passing them for one is a ``TypeError``.
     """
     if driver is not None:
+        if storage_options:
+            return driver(text, **storage_options)
         return driver(text)
     match = SCHEME_RE.match(text)
     if match is None:
@@ -386,16 +420,28 @@ def _build_from_string(text: str, driver: tx.Any) -> tx.Any:
             # An fsspec chain (simplecache::s3://...) with no leading
             # scheme://. The inner "://" is what marks it a URL, so a plain
             # local filename that merely contains "::" stays a local path.
-            return _select.build(text, "")
+            return _select.build(text, "", storage_options)
+        _reject_local_storage_options(storage_options, text)
         return LocalPath(text)
     scheme = match.group(1).lower()
     if scheme in LOCAL_PROTOCOLS:
+        _reject_local_storage_options(storage_options, text)
         return _local_from_url(text, scheme)
     # URL schemes are case-insensitive (RFC 3986) but a backend may reject a
     # mixed-case one; lower-case only the scheme, leaving the (possibly
     # case-sensitive) remainder of the URL untouched.
     text = scheme + text[match.end(1):]
-    return _select.build(text, scheme)
+    return _select.build(text, scheme, storage_options)
+
+
+def _reject_local_storage_options(
+    storage_options: tx.Optional[tx.Mapping[str, tx.Any]], text: str
+) -> None:
+    if storage_options:
+        raise TypeError(
+            f"storage_options= applies only to a remote URL; {text!r} is a "
+            "local path with no connection to configure"
+        )
 
 
 def _local_from_url(text: str, scheme: str) -> LocalPath:

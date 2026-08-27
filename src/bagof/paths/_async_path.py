@@ -28,38 +28,13 @@ from . import _bridge as bridge
 from . import _engine as engine
 from ._base import BaseWrapper
 from ._constants import LOCAL_PROTOCOLS
+from ._detect import is_async_driver as _is_async_driver
 from ._errors import UnsupportedPathOperation
 from ._path import Path
 from ._purepath import PurePathMixin
 from ._spec import BY_NAME
 
 _WALK_DONE = object()
-
-# type(driver) -> whether its members are coroutines. Detection is a property
-# of the driver class, so it is worked out once and cached (like the adapter
-# registry), not on every call.
-_ASYNC_DRIVER: tx.Dict[type, bool] = {}
-
-
-def _detect_async(wrapped: tx.Any) -> bool:
-    for name in ("exists", "open", "iterdir", "stat"):
-        member = getattr(wrapped, name, None)
-        if member is not None and (
-            inspect.iscoroutinefunction(member)
-            or inspect.isasyncgenfunction(member)
-        ):
-            return True
-    return False
-
-
-def _is_async_driver(wrapped: tx.Any) -> bool:
-    """Whether a wrapped object's members are coroutines."""
-    kind = type(wrapped)
-    cached = _ASYNC_DRIVER.get(kind)
-    if cached is None:
-        cached = _detect_async(wrapped)
-        _ASYNC_DRIVER[kind] = cached
-    return cached
 
 
 class AsyncFile:

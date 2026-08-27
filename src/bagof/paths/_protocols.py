@@ -35,9 +35,16 @@ class ProtocolTraits:
     driver:
         A preferred factory (a driver class, or a ``str -> path`` callable)
         used to build a path of this scheme before the availability order.
+    storage_options:
+        Default connection options (endpoint, credentials, ...) forwarded to
+        the driver for every path of this scheme. Per-call ``storage_options``
+        override these key by key. Held as data and never printed -- these
+        commonly hold secrets.
     """
 
-    __slots__ = ("bucketed", "absolute", "aliases", "driver")
+    __slots__ = (
+        "bucketed", "absolute", "aliases", "driver", "storage_options",
+    )
 
     def __init__(
         self,
@@ -45,18 +52,24 @@ class ProtocolTraits:
         bucketed: bool = False,
         absolute: bool = False,
         aliases: tx.Iterable[str] = (),
-        driver: tx.Optional[tx.Callable[[str], tx.Any]] = None,
+        driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
+        storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> None:
         self.bucketed = bucketed
         self.absolute = absolute
         self.aliases = tuple(aliases)
         self.driver = driver
+        self.storage_options = dict(storage_options or {})
 
     def __repr__(self) -> str:
+        # storage_options may hold credentials, so its contents are never
+        # rendered -- only whether any are set. A repr reaches debug logs.
+        options = "<redacted>" if self.storage_options else "{}"
         return (
             "ProtocolTraits("
             f"bucketed={self.bucketed!r}, absolute={self.absolute!r}, "
-            f"aliases={self.aliases!r}, driver={self.driver!r})"
+            f"aliases={self.aliases!r}, driver={self.driver!r}, "
+            f"storage_options={options})"
         )
 
 
@@ -74,13 +87,18 @@ def register_protocol(
     bucketed: bool = False,
     absolute: bool = False,
     aliases: tx.Iterable[str] = (),
-    driver: tx.Optional[tx.Callable[[str], tx.Any]] = None,
+    driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
+    storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> None:
     """Register (or replace) the traits for a URL ``scheme``.
 
     A later registration replaces an earlier one for the same scheme
     wholesale. Registering a scheme that was another scheme's alias detaches
     it: the explicit registration wins.
+
+    ``storage_options`` gives default connection options (endpoint,
+    credentials, ...) forwarded to the driver for every path of this scheme;
+    a per-call ``storage_options`` overrides them key by key.
 
     Register at import time -- see the module note on identity.
     """
@@ -99,6 +117,7 @@ def register_protocol(
         absolute=absolute,
         aliases=new_aliases,
         driver=driver,
+        storage_options=storage_options,
     )
     _PROTOCOLS[scheme] = traits
     # Replace wholesale: this scheme is canonical now (not an alias), and any
