@@ -48,14 +48,14 @@ class UnsupportedPathOperation(_Base):
 class NoDriverError(ValueError):
     """No installed driver can interpret a URL's scheme.
 
-    Raised at construction, when ``Path("scheme://...")`` names a scheme that
-    neither an explicit ``driver=`` nor any installed backend can build. It is
-    a ``ValueError`` -- the constructor's historical error type for a string it
-    cannot interpret -- so existing ``except ValueError`` handlers still catch
+    Raised at construction, when `Path("scheme://...")` names a scheme that
+    neither an explicit `driver=` nor any installed backend can build. It is
+    a `ValueError` -- the constructor's historical error type for a string it
+    cannot interpret -- so existing `except ValueError` handlers still catch
     it, and it says nothing about the scheme being unsupportable in principle:
     installing a backend (or registering one) can make the same string work.
 
-    The scheme is available on the ``scheme`` attribute.
+    The scheme is available on the `scheme` attribute.
     """
 
     def __init__(self, scheme: str, *, hint: tx.Optional[str] = None) -> None:

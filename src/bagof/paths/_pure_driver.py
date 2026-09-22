@@ -4,7 +4,7 @@ This is the driver behind a path that has no installed backend: it implements
 only the lexical (pure) surface, entirely with the standard library, so a
 remote URL can be parsed and manipulated with neither universal-pathlib nor
 cloudpathlib present. `AsyncFSPath` is the shape precedent -- lexical members
-over a `PurePosixPath`.
+over a [`PurePosixPath`][pathlib.PurePosixPath].
 
 The path is a **wrapped driver object**, not a wrapper itself. `Path` (or the
 public `PurePath`) holds one in `_wrapped` and delegates to it through the
@@ -21,8 +21,9 @@ absolute key path, so a bucket root normalizes to a trailing slash
 (`s3://bucket` has path `bucket/`) and the parent of a bucket root is the
 bucket root again.
 
-A lexical member is delegated to the wrapped `PurePosixPath`, so its
-normalization is the standard library's. A `.` segment and a doubled slash
+A lexical member is delegated to the wrapped
+[`PurePosixPath`][pathlib.PurePosixPath], so its normalization is the
+standard library's. A `.` segment and a doubled slash
 are collapsed, which universal-pathlib preserves. Ordinary keys, which contain
 neither, are unaffected.
 """

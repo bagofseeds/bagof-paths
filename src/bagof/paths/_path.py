@@ -14,7 +14,7 @@ from ._spec import BY_NAME
 
 
 class Path(PurePathMixin, BaseWrapper):
-    """A path that works like ``pathlib.Path``, local or in the cloud.
+    """A path that works like [pathlib.Path][], local or in the cloud.
 
     Make one from a path string, a URL, or any path object:
 
@@ -30,7 +30,7 @@ class Path(PurePathMixin, BaseWrapper):
     ```
 
     Each method uses the underlying library when it can, builds the method
-    from simpler ones when it cannot, or raises ``UnsupportedPathOperation``
+    from simpler ones when it cannot, or raises `UnsupportedPathOperation`
     when neither is possible.
     """
 
@@ -63,18 +63,18 @@ class Path(PurePathMixin, BaseWrapper):
         return engine.invoke(self, BY_NAME["is_symlink"])
 
     def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
-        """The result of ``stat`` on the path."""
+        """The result of `stat` on the path."""
         return engine.invoke(
             self, BY_NAME["stat"], (),
             {"follow_symlinks": follow_symlinks},
         )
 
     def lstat(self) -> os.stat_result:
-        """Like :meth:`stat`, without following symbolic links."""
+        """Like `stat`, without following symbolic links."""
         return engine.invoke(self, BY_NAME["lstat"])
 
     def samefile(self, other: tx.Any) -> bool:
-        """Whether the path and ``other`` refer to the same file."""
+        """Whether the path and `other` refer to the same file."""
         return engine.invoke(self, BY_NAME["samefile"], (other,))
 
     # -- extended status queries -------------------------------------------
@@ -111,7 +111,7 @@ class Path(PurePathMixin, BaseWrapper):
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
     ) -> tx.IO[tx.Any]:
-        """Open the path and return a file object, like :func:`open`."""
+        """Open the path and return a file object, like `open`."""
         return engine.invoke(
             self, BY_NAME["open"], (mode,),
             {
@@ -139,7 +139,7 @@ class Path(PurePathMixin, BaseWrapper):
         )
 
     def write_bytes(self, data: tx.Any) -> int:
-        """Write ``data`` to the file as bytes, replacing any content."""
+        """Write `data` to the file as bytes, replacing any content."""
         return engine.invoke(self, BY_NAME["write_bytes"], (data,))
 
     def write_text(
@@ -149,7 +149,7 @@ class Path(PurePathMixin, BaseWrapper):
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
     ) -> int:
-        """Write ``data`` to the file as text, replacing any content."""
+        """Write `data` to the file as text, replacing any content."""
         return engine.invoke(
             self, BY_NAME["write_text"], (data,),
             {"encoding": encoding, "errors": errors, "newline": newline},
@@ -167,7 +167,7 @@ class Path(PurePathMixin, BaseWrapper):
         case_sensitive: tx.Optional[bool] = None,
         recurse_symlinks: bool = False,
     ) -> tx.Iterator[tx.Self]:
-        """Yield the paths matching ``pattern`` under this directory."""
+        """Yield the paths matching `pattern` under this directory."""
         return engine.invoke(
             self, BY_NAME["glob"], (pattern,),
             {
@@ -183,7 +183,7 @@ class Path(PurePathMixin, BaseWrapper):
         case_sensitive: tx.Optional[bool] = None,
         recurse_symlinks: bool = False,
     ) -> tx.Iterator[tx.Self]:
-        """Like :meth:`glob`, recursively."""
+        """Like `glob`, recursively."""
         return engine.invoke(
             self, BY_NAME["rglob"], (pattern,),
             {
@@ -219,8 +219,8 @@ class Path(PurePathMixin, BaseWrapper):
     def rmdir(self, *, recursive: bool = False) -> None:
         """Remove the directory at the path.
 
-        With ``recursive=True`` the whole tree is removed. The default is
-        non-recursive and stays safe even on drivers whose own ``rmdir``
+        With `recursive=True` the whole tree is removed. The default is
+        non-recursive and stays safe even on drivers whose own `rmdir`
         recurses by default (universal-pathlib).
         """
         _drivers.adapter_for(self._wrapped).rmdir(self, recursive=recursive)
@@ -233,7 +233,7 @@ class Path(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy this file or directory to ``target``; return the new path."""
+        """Copy this file or directory to `target`; return the new path."""
         driver_target = self._coerce_target(target)
         _drivers.adapter_for(self._wrapped).copy(
             self, driver_target,
@@ -249,7 +249,7 @@ class Path(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy into ``target_dir``, keeping this path's name."""
+        """Copy into `target_dir`, keeping this path's name."""
         dest = self._coerce_target(target_dir) / self.name
         return self.copy(
             dest,
@@ -258,13 +258,13 @@ class Path(PurePathMixin, BaseWrapper):
         )
 
     def move(self, target: tx.Any) -> tx.Self:
-        """Move this path to ``target``; return the new path."""
+        """Move this path to `target`; return the new path."""
         driver_target = self._coerce_target(target)
         _drivers.adapter_for(self._wrapped).move(self, driver_target)
         return self.with_wrapped(driver_target)
 
     def move_into(self, target_dir: tx.Any) -> tx.Self:
-        """Move into ``target_dir``, keeping this path's name."""
+        """Move into `target_dir`, keeping this path's name."""
         dest = self._coerce_target(target_dir) / self.name
         return self.move(dest)
 
@@ -275,7 +275,7 @@ class Path(PurePathMixin, BaseWrapper):
         on_error: tx.Optional[tx.Callable] = None,
         follow_symlinks: bool = False,
     ) -> tx.Iterator[tx.Tuple[tx.Self, tx.List[str], tx.List[str]]]:
-        """Walk the tree, yielding ``(path, dirnames, filenames)`` per dir."""
+        """Walk the tree, yielding `(path, dirnames, filenames)` per dir."""
         return _drivers.adapter_for(self._wrapped).walk(
             self,
             top_down=top_down,
@@ -295,7 +295,7 @@ class Path(PurePathMixin, BaseWrapper):
         return engine.invoke(self, BY_NAME["absolute"])
 
     def expanduser(self) -> tx.Self:
-        """The path with a leading ``~`` expanded."""
+        """The path with a leading `~` expanded."""
         return engine.invoke(self, BY_NAME["expanduser"])
 
     def readlink(self) -> tx.Self:
@@ -303,13 +303,13 @@ class Path(PurePathMixin, BaseWrapper):
         return engine.invoke(self, BY_NAME["readlink"])
 
     def rename(self, target: tx.Any) -> tx.Self:
-        """Rename the path to ``target`` and return the new path."""
+        """Rename the path to `target` and return the new path."""
         return engine.invoke(
             self, BY_NAME["rename"], (self._coerce_target(target),)
         )
 
     def replace(self, target: tx.Any) -> tx.Self:
-        """Rename the path to ``target``, replacing any existing file."""
+        """Rename the path to `target`, replacing any existing file."""
         return engine.invoke(
             self, BY_NAME["replace"], (self._coerce_target(target),)
         )
@@ -323,7 +323,7 @@ class Path(PurePathMixin, BaseWrapper):
         )
 
     def lchmod(self, mode: int) -> None:
-        """Like :meth:`chmod`, without following symbolic links."""
+        """Like `chmod`, without following symbolic links."""
         return engine.invoke(self, BY_NAME["lchmod"], (mode,))
 
     def owner(self, *, follow_symlinks: bool = True) -> str:
@@ -344,23 +344,23 @@ class Path(PurePathMixin, BaseWrapper):
     def symlink_to(
         self, target: tx.Any, target_is_directory: bool = False
     ) -> None:
-        """Make this path a symbolic link to ``target``."""
+        """Make this path a symbolic link to `target`."""
         return engine.invoke(
             self, BY_NAME["symlink_to"], (target,),
             {"target_is_directory": target_is_directory},
         )
 
     def hardlink_to(self, target: tx.Any) -> None:
-        """Make this path a hard link to ``target``."""
+        """Make this path a hard link to `target`."""
         return engine.invoke(self, BY_NAME["hardlink_to"], (target,))
 
     def link_to(self, target: tx.Any) -> None:
-        """Make ``target`` a hard link to this path.
+        """Make `target` a hard link to this path.
 
         .. deprecated::
-           ``link_to`` takes the *reverse* argument order of
-           :meth:`hardlink_to` and was removed from ``pathlib`` in Python
-           3.12. Prefer :meth:`hardlink_to`; this is kept, and synthesized
+           `link_to` takes the *reverse* argument order of
+           `hardlink_to` and was removed from `pathlib` in Python
+           3.12. Prefer `hardlink_to`; this is kept, and synthesized
            where the driver dropped it, only for backward compatibility.
         """
         return engine.invoke(self, BY_NAME["link_to"], (target,))
@@ -373,11 +373,11 @@ class Path(PurePathMixin, BaseWrapper):
         return engine.invoke(self, BY_NAME["as_url"], (), kwargs)
 
     def download_to(self, destination: tx.Any) -> tx.Any:
-        """Download the path's contents to a local ``destination``."""
+        """Download the path's contents to a local `destination`."""
         return engine.invoke(self, BY_NAME["download_to"], (destination,))
 
     def upload_from(self, source: tx.Any, **kwargs: tx.Any) -> tx.Any:
-        """Upload a local ``source`` to the path."""
+        """Upload a local `source` to the path."""
         return engine.invoke(
             self, BY_NAME["upload_from"], (source,), kwargs
         )
@@ -390,7 +390,7 @@ class Path(PurePathMixin, BaseWrapper):
     # Familiar names from cloudpathlib and shutil; both route through the
     # adapter-backed copy / rmdir so their divergence is handled in one place.
     def rmtree(self) -> None:
-        """Remove the directory tree at the path. Alias of ``rmdir``."""
+        """Remove the directory tree at the path. Alias of `rmdir`."""
         self.rmdir(recursive=True)
 
     def copytree(
@@ -400,7 +400,7 @@ class Path(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy a directory tree to ``target``. Alias of ``copy``."""
+        """Copy a directory tree to `target`. Alias of `copy`."""
         return self.copy(
             target,
             follow_symlinks=follow_symlinks,

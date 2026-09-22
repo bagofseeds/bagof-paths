@@ -2,21 +2,22 @@
 reconciled in one place.
 
 Most of the surface is uniform and goes through the engine. A few operations
-are not -- ``rmdir``'s recursion, native ``copy``/``move``, ``walk`` -- because
+are not -- `rmdir`'s recursion, native `copy`/`move`, `walk` -- because
 the backends genuinely disagree:
 
-- ``UPath``'s bare ``rmdir()`` deletes a *non-empty* tree (its ``recursive``
-  defaults to ``True``), so the wrapper must always pass ``recursive=False``;
-- ``cloudpathlib`` has no recursive ``rmdir`` at all, but a separate
-  ``rmtree()``;
-- ``pathlib`` gained ``copy`` in 3.14 and ``walk`` in 3.12.
+- `UPath`'s bare `rmdir()` deletes a *non-empty* tree (its `recursive`
+  defaults to `True`), so the wrapper must always pass `recursive=False`;
+- `cloudpathlib` has no recursive `rmdir` at all, but a separate
+  `rmtree()`;
+- `pathlib` gained `copy` in 3.14 and `walk` in 3.12.
 
-Each such operation lives on an adapter: a :class:`GenericAdapter` that works
+Each such operation lives on an adapter: a `GenericAdapter` that works
 on any (including unknown) driver by duck-typing, and named subclasses that
 override only the specific points a known driver diverges on. Adapters are
-selected by driver type through :func:`adapter_for`; an unknown driver gets
-the generic one with no registration, and a later :func:`register_driver`
-wins over an earlier one for the same object.
+selected by driver type through `adapter_for`; an unknown driver gets
+the generic one with no registration, and a later
+[`register_driver`][bagof.paths.register_driver] wins over an earlier
+one for the same object.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from ._errors import UnsupportedPathOperation
 
 
 def _accepts(func: tx.Any, name: str) -> bool:
-    """Whether ``func`` accepts a keyword argument called ``name``."""
+    """Whether `func` accepts a keyword argument called `name`."""
     try:
         return name in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover
@@ -239,7 +240,7 @@ _CACHE: tx.Dict[type, GenericAdapter] = {}
 
 
 def register_driver(base: type, adapter: GenericAdapter) -> None:
-    """Register ``adapter`` for a driver base class and its subclasses.
+    """Register `adapter` for a driver base class and its subclasses.
 
     A later registration wins over an earlier one for an object matching
     both, so a small adapter for a specific class overrides a family default.

@@ -3,8 +3,8 @@
 The async wrapper reuses the whole synchronous implementation -- engine,
 fallbacks, adapters -- by running it on a sync view of the same driver in a
 worker thread, so the blocking work never stalls the event loop and no policy
-is written twice. This is stdlib only: ``run_in_executor`` with a
-``functools.partial`` (``asyncio.to_thread`` is 3.9+, and we support 3.8),
+is written twice. This is stdlib only: `run_in_executor` with a
+`functools.partial` (`asyncio.to_thread` is 3.9+, and we support 3.8),
 which also lets keyword arguments through.
 """
 
@@ -22,7 +22,7 @@ from ._errors import UnsupportedPathOperation
 async def run(
     func: tx.Callable[..., tx.Any], *args: tx.Any, **kwargs: tx.Any
 ) -> tx.Any:
-    """Run a blocking ``func`` in the default thread pool and await it."""
+    """Run a blocking `func` in the default thread pool and await it."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError as error:  # pragma: no cover

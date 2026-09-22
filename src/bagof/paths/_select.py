@@ -1,18 +1,18 @@
 """Driver selection: build a backend path object from a URL string.
 
 Given a scheme that is not the local filesystem (or an fsspec chain like
-``simplecache::s3://...``), pick a backend and construct a path. The order is:
+`simplecache::s3://...`), pick a backend and construct a path. The order is:
 a protocol's preferred driver, then the availability order universal-pathlib
 then cloudpathlib. A scheme no installed backend can build raises
-:class:`~bagof.paths.NoDriverError` -- never a silent local path.
+[`NoDriverError`][bagof.paths.NoDriverError] -- never a silent local path.
 
 universal-pathlib is the default: it builds any fsspec URL lazily (no cloud
 SDK is needed to *construct* a path, only to do I/O) and covers the widest set
 of schemes. cloudpathlib is the fallback for when universal-pathlib is absent;
 its concrete implementation class is selected from its own registry -- never
-``AnyPath``, whose answer for an unrecognised scheme is a silent local path.
+`AnyPath`, whose answer for an unrecognised scheme is a silent local path.
 
-Only universal-pathlib's *unknown-scheme* rejection becomes ``NoDriverError``.
+Only universal-pathlib's *unknown-scheme* rejection becomes `NoDriverError`.
 A driver that recognises the scheme but rejects the URL for another reason (a
 missing storage option, a bad prefix), and any error from an explicitly
 preferred driver, is a real error and propagates unchanged.
@@ -39,9 +39,9 @@ def build(
     scheme: str,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> tx.Any:
-    """Construct a driver path for a remote ``scheme`` (or fsspec chain).
+    """Construct a driver path for a remote `scheme` (or fsspec chain).
 
-    ``storage_options`` (endpoint, credentials, ...) are forwarded to the
+    `storage_options` (endpoint, credentials, ...) are forwarded to the
     chosen driver. A per-scheme default registered with the protocol is the
     base; the per-call mapping overrides it key by key.
     """
@@ -87,7 +87,7 @@ def _call_factory(
 ) -> tx.Any:
     """Build a path, forwarding storage options only when there are any.
 
-    A driver whose signature is the historical ``str -> path`` still works:
+    A driver whose signature is the historical `str -> path` still works:
     with no options it is called with the URL alone.
     """
     return factory(text, **options) if options else factory(text)
@@ -113,9 +113,9 @@ def _cloud_key(scheme: str) -> str:
 
 
 def _cloudpathlib_impl(scheme: str) -> tx.Any:
-    """cloudpathlib's implementation entry for a scheme, or ``None``.
+    """cloudpathlib's implementation entry for a scheme, or `None`.
 
-    Reads the registry only -- it does not touch ``path_class``, so it does
+    Reads the registry only -- it does not touch `path_class`, so it does
     not trigger the missing-SDK fail-fast. That lets a caller decide whether
     the scheme is cloudpathlib's to handle before forcing the SDK to load.
     """

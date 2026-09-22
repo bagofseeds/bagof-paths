@@ -51,8 +51,8 @@ class PurePath(PurePathMixin, BaseWrapper):
 
     A `PurePath` and a [`Path`][bagof.paths.Path] for the same location compare
     equal and hash alike, so one serves to look the other up in a set or a
-    dictionary. This mirrors `pathlib`, where a pure path equals the full path
-    beside it.
+    dictionary. This mirrors [`pathlib`][pathlib], where a pure path equals
+    the full path beside it.
     """
 
     __slots__ = ()

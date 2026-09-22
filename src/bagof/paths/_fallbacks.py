@@ -4,11 +4,11 @@ When the wrapped object lacks a member but does provide more primitive ones,
 the member is synthesized here rather than raising. Each function takes the
 wrapper as its first argument and uses the wrapper's own (delegated) members,
 so a fallback composes on top of whatever the driver does implement -- text
-from bytes, bytes from ``open``.
+from bytes, bytes from `open`.
 
-The engine looks a fallback up by name (the ``fallback`` field of a spec
-:class:`~bagof.paths._spec.Member`) and only calls it once the member's
-``needs`` are satisfied, so a fallback may assume its primitives exist.
+The engine looks a fallback up by name (the `fallback` field of a spec
+`Member`) and only calls it once the member's
+`needs` are satisfied, so a fallback may assume its primitives exist.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from ._errors import UnsupportedPathOperation
 
 
 def read_bytes(wrapper: tx.Any) -> bytes:
-    """``read_bytes`` from ``open``."""
+    """`read_bytes` from `open`."""
     with wrapper.open("rb") as handle:
         return handle.read()
 
@@ -34,10 +34,10 @@ def read_text(
     errors: tx.Optional[str] = None,
     newline: tx.Optional[str] = None,
 ) -> str:
-    """``read_text`` from ``read_bytes``.
+    """`read_text` from `read_bytes`.
 
-    Decoding goes through the same text layer ``open()`` uses, so newline
-    translation and the encoding defaults match a native ``read_text``.
+    Decoding goes through the same text layer `open()` uses, so newline
+    translation and the encoding defaults match a native `read_text`.
     """
     stream = io.TextIOWrapper(
         io.BytesIO(wrapper.read_bytes()),
@@ -50,7 +50,7 @@ def read_text(
 
 
 def write_bytes(wrapper: tx.Any, data: tx.Any) -> int:
-    """``write_bytes`` from ``open``; returns the number of bytes written."""
+    """`write_bytes` from `open`; returns the number of bytes written."""
     view = memoryview(data).cast("B")
     with wrapper.open("wb") as handle:
         return handle.write(view)
@@ -63,10 +63,10 @@ def write_text(
     errors: tx.Optional[str] = None,
     newline: tx.Optional[str] = None,
 ) -> int:
-    """``write_text`` from ``write_bytes``.
+    """`write_text` from `write_bytes`.
 
-    Encoding goes through the same text layer ``open()`` uses, so newline
-    translation matches a native ``write_text``. Returns the number of
+    Encoding goes through the same text layer `open()` uses, so newline
+    translation matches a native `write_text`. Returns the number of
     characters written.
     """
     if not isinstance(data, str):
@@ -85,13 +85,13 @@ def write_text(
 
 
 def with_stem(wrapper: tx.Any, stem: str) -> tx.Any:
-    """``with_stem`` from ``with_name`` (pathlib gained it in 3.9)."""
+    """`with_stem` from `with_name` (pathlib gained it in 3.9)."""
     wrapped = wrapper._wrapped
     return wrapped.with_name(stem + wrapped.suffix)
 
 
 def is_relative_to(wrapper: tx.Any, other: tx.Any) -> bool:
-    """``is_relative_to`` from ``relative_to`` (pathlib gained it in 3.9)."""
+    """`is_relative_to` from `relative_to` (pathlib gained it in 3.9)."""
     try:
         wrapper._wrapped.relative_to(other)
     except ValueError:
@@ -100,13 +100,13 @@ def is_relative_to(wrapper: tx.Any, other: tx.Any) -> bool:
 
 
 def with_segments(wrapper: tx.Any, *segments: tx.Any) -> tx.Any:
-    """``with_segments`` from the wrapped type (pathlib gained it in 3.12).
+    """`with_segments` from the wrapped type (pathlib gained it in 3.12).
 
     A local path is reconstructed through its own constructor, the same
-    construction ``pathlib`` performs internally when deriving a path. A
+    construction `pathlib` performs internally when deriving a path. A
     non-local driver is refused rather than reconstructed: its configuration
     (storage options, a client, credentials) lives in constructor arguments a
-    bare ``type(wrapped)(*segments)`` would drop, silently pointing the new
+    bare `type(wrapped)(*segments)` would drop, silently pointing the new
     path at a different or unauthenticated store.
     """
     if wrapper.protocol not in LOCAL_PROTOCOLS:
@@ -123,11 +123,11 @@ def with_segments(wrapper: tx.Any, *segments: tx.Any) -> tx.Any:
 
 
 def hardlink_to(wrapper: tx.Any, target: tx.Any) -> None:
-    """``hardlink_to`` from ``os.link`` (pathlib gained it in 3.10).
+    """`hardlink_to` from [os.link][] (pathlib gained it in 3.10).
 
-    Makes this path a new hard link to ``target``. Hard links are a local
+    Makes this path a new hard link to `target`. Hard links are a local
     filesystem operation, so a non-local driver without a native
-    ``hardlink_to`` is refused rather than guessed at.
+    `hardlink_to` is refused rather than guessed at.
     """
     if wrapper.protocol not in LOCAL_PROTOCOLS:
         raise UnsupportedPathOperation(
@@ -139,10 +139,10 @@ def hardlink_to(wrapper: tx.Any, target: tx.Any) -> None:
 
 
 def is_junction(wrapper: tx.Any) -> bool:
-    """``is_junction`` for drivers/versions without it.
+    """`is_junction` for drivers/versions without it.
 
     Junctions are a Windows filesystem concept; a local path is tested with
-    :func:`os.path.isjunction` (itself added in 3.12), and anything else --
+    `os.path.isjunction` (itself added in 3.12), and anything else --
     an older interpreter, a non-local path -- is not a junction.
     """
     isjunction = getattr(os.path, "isjunction", None)
@@ -152,11 +152,11 @@ def is_junction(wrapper: tx.Any) -> bool:
 
 
 def as_url(wrapper: tx.Any, **kwargs: tx.Any) -> str:
-    """``as_url`` from ``as_uri``.
+    """`as_url` from `as_uri`.
 
     A plain URI is the driver-independent URL. Presigning and other keyword
     options are driver-native, so a call that passes them on a driver without
-    its own ``as_url`` is refused rather than silently answered with an
+    its own `as_url` is refused rather than silently answered with an
     unsigned URI.
     """
     if kwargs:
@@ -173,11 +173,11 @@ def as_url(wrapper: tx.Any, **kwargs: tx.Any) -> str:
 
 
 def link_to(wrapper: tx.Any, target: tx.Any) -> None:
-    """``link_to`` from ``hardlink_to`` (removed from pathlib in 3.12).
+    """`link_to` from `hardlink_to` (removed from pathlib in 3.12).
 
-    ``link_to`` makes *target* a hard link to this path -- the reverse
-    argument order of :meth:`hardlink_to`, which makes *this path* a link to
-    its argument -- so the synthesis creates the link at ``target``.
+    `link_to` makes *target* a hard link to this path -- the reverse
+    argument order of `hardlink_to`, which makes *this path* a link to
+    its argument -- so the synthesis creates the link at `target`.
     """
     driver_target = wrapper._coerce_target(target)
     wrapper.with_wrapped(driver_target).hardlink_to(wrapper._wrapped)
