@@ -34,7 +34,8 @@ from pathlib import PurePosixPath
 import typing_extensions as tx
 
 from ._constants import SCHEME_RE
-from ._protocols import traits_for
+from ._errors import UnsupportedPathOperation
+from ._protocols import canonical_scheme, traits_for
 
 
 def _split_url(scheme: str, url: str) -> tx.Tuple[str, PurePosixPath]:
@@ -192,26 +193,47 @@ class PureCloudPath:
         return self._pure
 
     def _other_locus(self, other: tx.Any) -> PurePosixPath:
+        # A different scheme names an unrelated store, so a path is never
+        # relative to it. Reject before comparing, as universal-pathlib does,
+        # while a same-store alias (s3/s3a) still compares equal.
         if isinstance(other, PureCloudPath):
+            self._require_same_scheme(other._scheme)
             return other._locus()
         text = str(other)
         if "://" in text:
             match = SCHEME_RE.match(text)
             scheme = match.group(1).lower() if match else self._scheme
+            self._require_same_scheme(scheme)
             drive, pure = _split_url(scheme, text)
             return PureCloudPath(scheme, drive, pure)._locus()
         return PurePosixPath(text)
 
+    def _require_same_scheme(self, other_scheme: str) -> None:
+        if canonical_scheme(other_scheme) != canonical_scheme(self._scheme):
+            mine = f"{self._scheme}://"
+            theirs = f"{other_scheme}://"
+            raise ValueError(
+                f"a {mine!r} path is not relative to a {theirs!r} path"
+            )
+
     def relative_to(
         self, other: tx.Any, walk_up: bool = False
-    ) -> PureCloudPath:
+    ) -> PurePosixPath:
         base = self._other_locus(other)
-        if walk_up:
-            rel = self._locus().relative_to(base, walk_up=True)
-        else:
-            rel = self._locus().relative_to(base)
-        # The result is a bare key relative to the base, carrying no drive.
-        return PureCloudPath(self._scheme, "", rel, self._options)
+        # The result is a bare, scheme-less relative path, matching what a real
+        # backend returns; the engine re-wraps it as a relative path.
+        if not walk_up:
+            return self._locus().relative_to(base)
+        try:
+            return self._locus().relative_to(base, walk_up=True)
+        except TypeError:  # pragma: no cover - walk_up is 3.12+
+            # A pre-3.12 PurePosixPath.relative_to has no walk_up keyword, so
+            # name the limitation rather than surface a raw TypeError.
+            raise UnsupportedPathOperation(
+                "relative_to",
+                driver=self,
+                hint="walk_up= requires Python 3.12 or newer",
+            ) from None
 
     # -- display -----------------------------------------------------------
     def __str__(self) -> str:

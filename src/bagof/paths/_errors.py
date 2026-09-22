@@ -33,7 +33,11 @@ class UnsupportedPathOperation(_Base):
         self.operation = operation
         self.driver = driver
         message = f"{operation!r} is not supported"
-        if driver is not None:
+        # A driver that carries its own hint is the internal backendless
+        # driver; naming it would leak a private class, so name only the
+        # operation and let the hint carry the meaning.
+        internal = getattr(driver, "_unsupported_hint", None) is not None
+        if driver is not None and not internal:
             name = getattr(driver, "__name__", None) or type(driver).__name__
             message += f" for {name}"
         if hint:

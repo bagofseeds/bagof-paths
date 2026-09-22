@@ -9,6 +9,8 @@ backend.
 """
 
 import asyncio
+import pathlib
+import sys
 
 import pytest
 
@@ -194,7 +196,109 @@ def test_no_backend_path_is_lexical_then_refuses_io(
     assert p.suffix == ".txt"
     assert str(p.parent) == "s3://bucket/dir"
     assert (p == PurePath("s3://bucket/dir/key.txt")) is True
-    # I/O is refused with a hint that names the remedy.
+    # I/O is refused with a hint that names the remedy, and never leaks the
+    # internal driver class name.
     with pytest.raises(UnsupportedPathOperation) as info:
         p.read_bytes()
-    assert "backend" in str(info.value)
+    message = str(info.value)
+    assert "backend" in message
+    assert "PureCloudPath" not in message
+
+
+# -- cross-scheme relative_to (a different store is never relative) ---------
+def test_relative_to_rejects_a_different_scheme() -> None:
+    p = PurePath("s3://bucket/dir/key.txt")
+    # A different store is not a parent, matching universal-pathlib.
+    assert p.is_relative_to("gs://bucket/dir") is False
+    with pytest.raises(ValueError):
+        p.relative_to("gs://bucket/dir")
+
+
+def test_relative_to_accepts_a_same_store_alias() -> None:
+    p = PurePath("s3://bucket/dir/key.txt")
+    # s3 and s3a name the same store, so one is relative to the other.
+    assert p.is_relative_to("s3a://bucket/dir") is True
+    assert p.is_relative_to("s3://bucket/dir") is True
+
+
+def test_relative_to_result_is_scheme_less() -> None:
+    p = PurePath("s3://bucket/dir/key.txt")
+    rel = p.relative_to("s3://bucket/dir")
+    # The result is a plain relative path, with no scheme prefix in its text.
+    assert str(rel) == "key.txt"
+    assert rel.path == "key.txt"
+    assert rel.protocol == ""
+    # A path-object operand is accepted too.
+    assert str(p.relative_to(PurePath("s3://bucket"))) == "dir/key.txt"
+    # A bare relative operand is not a parent of an absolute remote path.
+    assert p.is_relative_to("key.txt") is False
+
+
+def test_relative_to_on_a_relative_scheme() -> None:
+    # An unregistered scheme is neither bucketed nor absolute, so its key path
+    # is relative; relative_to still compares within the scheme.
+    p = PureCloudPath.from_url("thing://a/b/c", "thing")
+    rel = p.relative_to(PureCloudPath.from_url("thing://a", "thing"))
+    assert str(rel) == "b/c"
+
+
+def test_relative_to_walk_up() -> None:
+    p = PurePath("s3://bucket/dir/key.txt")
+    if sys.version_info >= (3, 12):
+        rel = p.relative_to("s3://bucket/other", walk_up=True)
+        assert str(rel) == "../dir/key.txt"
+    else:
+        # walk_up reached PurePath in 3.12; older floors name the limitation
+        # rather than surface a raw TypeError.
+        with pytest.raises(UnsupportedPathOperation):
+            p.relative_to("s3://bucket/other", walk_up=True)
+
+
+# -- the "." / "//" normalization residual (pinned; see design §5) ----------
+def test_dot_and_double_slash_collapse() -> None:
+    # The lexical driver delegates to PurePosixPath, which collapses a "."
+    # segment and a doubled slash. universal-pathlib preserves both; this
+    # documents and pins the residual divergence for ordinary use.
+    assert PurePath("s3://bucket/a//b").path == "bucket/a/b"
+    assert PurePath("s3://bucket/a/./b").path == "bucket/a/b"
+
+
+# -- the lexical accessors that need no backend -----------------------------
+def test_remote_lexical_accessors() -> None:
+    p = PurePath("s3://bucket/dir/file.tar.gz")
+    assert p.stem == "file.tar"
+    assert p.suffixes == [".tar", ".gz"]
+    assert p.as_posix() == "s3://bucket/dir/file.tar.gz"
+    assert p.as_uri() == "s3://bucket/dir/file.tar.gz"
+    assert p.is_absolute() is True
+    assert p.is_reserved() is False
+    assert p.storage_options == {}
+    # The driver's own repr names it plainly.
+    assert repr(p.wrapped) == "PureCloudPath('s3://bucket/dir/file.tar.gz')"
+
+
+# -- construction routes: explicit driver, chain, and file URL --------------
+def test_construction_with_explicit_driver() -> None:
+    built = []
+
+    def factory(text: str) -> pathlib.PurePosixPath:
+        built.append(text)
+        return pathlib.PurePosixPath(text)
+
+    p = PurePath("s3://bucket/key", driver=factory)
+    assert built == ["s3://bucket/key"]
+    assert isinstance(p.wrapped, pathlib.PurePath)
+
+
+def test_construction_of_an_fsspec_chain() -> None:
+    p = PurePath("simplecache::s3://bucket/key")
+    assert isinstance(p.wrapped, PureCloudPath)
+    # A chain has no single identity scheme.
+    assert p.protocol == ""
+
+
+def test_construction_from_a_file_url(tmp_path: pathlib.Path) -> None:
+    target = tmp_path / "a.txt"
+    p = PurePath(target.as_uri())  # file://...
+    assert isinstance(p.wrapped, pathlib.PurePath)
+    assert str(p) == str(target)
