@@ -1,0 +1,69 @@
+name: Docs check
+
+# Build the documentation on a pull request and fail when a cross-reference
+# does not resolve. This does not deploy: it only validates the build, so it
+# needs no Pages permissions. The org reusable docs workflow
+# (bagofseeds/actions/.github/workflows/docs.yaml@main) always deploys to
+# Pages and is used only on push to main, so the check here is a
+# self-contained build-only job.
+
+on:
+  pull_request:
+    paths:
+      - docs/**
+      - src/**
+      - README.md
+      - zensical.toml
+      - docs/requirements.txt
+      - .github/workflows/docs*.yaml
+  push:
+    branches:
+      - main
+    paths:
+      - docs/**
+      - src/**
+      - README.md
+      - zensical.toml
+      - docs/requirements.txt
+      - .github/workflows/docs*.yaml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build docs (strict)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install the package and docs dependencies
+        shell: bash
+        run: |
+          pip install -e .
+          pip install -r docs/requirements.txt
+
+      - name: Build docs and fail on unresolved cross-references
+        shell: bash
+        run: |
+          # zensical's --strict aborts the build with a non-zero exit on any
+          # warning, and an unresolved cross-reference (autoref) is reported
+          # as a warning. The check does not match a specific message, so it
+          # catches every unresolved reference, not one known string.
+          #
+          # The output is captured as well, and the step fails if it names an
+          # unresolved reference even should a future --strict change its exit
+          # behaviour. The runner reaches the Python and typing_extensions
+          # inventories, so a reference that resolves there passes here.
+          set -o pipefail
+          zensical build --strict --clean 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          if grep -qi 'unresolved' build.log; then
+            echo "::error::The docs build reported an unresolved cross-reference."
+            exit 1
+          fi
+          exit "$status"
