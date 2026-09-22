@@ -19,6 +19,17 @@ from ._spec import Member
 _MISSING = object()
 
 
+def _raise_unsupported(wrapper: BaseWrapper, name: str) -> tx.NoReturn:
+    """Raise for a member that can be neither delegated nor synthesized.
+
+    A driver may offer an ``_unsupported_hint`` string that explains the
+    remedy (a backendless remote path uses this to point at installing a
+    backend); it is added to the message when present.
+    """
+    hint = getattr(wrapper._wrapped, "_unsupported_hint", None)
+    raise UnsupportedPathOperation(name, driver=wrapper._wrapped, hint=hint)
+
+
 def _unwrap(value: tx.Any) -> tx.Any:
     """A wrapper passed as an argument is delegated as its wrapped path."""
     return value._wrapped if isinstance(value, BaseWrapper) else value
@@ -60,7 +71,7 @@ def get(wrapper: BaseWrapper, member: Member) -> tx.Any:
     value = getattr(wrapper._wrapped, member.name, _MISSING)
     if value is not _MISSING:
         return _finish(wrapper, value, member.result)
-    raise UnsupportedPathOperation(member.name, driver=wrapper._wrapped)
+    _raise_unsupported(wrapper, member.name)
 
 
 def invoke(
@@ -78,7 +89,7 @@ def invoke(
     if member.fallback and _has_needs(wrapper, member):
         synth = FALLBACKS[member.fallback]
         return _finish(wrapper, synth(wrapper, *args, **kwargs), member.result)
-    raise UnsupportedPathOperation(member.name, driver=wrapper._wrapped)
+    _raise_unsupported(wrapper, member.name)
 
 
 def _has_needs(wrapper: BaseWrapper, member: Member) -> bool:

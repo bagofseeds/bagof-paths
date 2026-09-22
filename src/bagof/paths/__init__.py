@@ -14,12 +14,14 @@ from ._protocols import (
     register_protocol,
     set_storage_options,
 )
+from ._pure import PurePath
 
 __all__ = [
     "AsyncPath",
     "NoDriverError",
     "Path",
     "ProtocolTraits",
+    "PurePath",
     "UnsupportedPathOperation",
     "register_driver",
     "register_protocol",

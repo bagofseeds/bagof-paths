@@ -223,7 +223,10 @@ def test_home_cwd_from_uri(tmp_path: pathlib.Path) -> None:
 
 def test_from_uri_unknown_scheme_raises() -> None:
     # from_uri routes a non-file scheme through the constructor's driver
-    # selection, so a scheme no backend can build raises (a ValueError).
+    # selection, so a scheme universal-pathlib rejects raises (a ValueError).
+    # With no backend installed the scheme instead degrades to a lexical path,
+    # so this rejection is specific to having universal-pathlib.
+    pytest.importorskip("upath")
     with pytest.raises(ValueError):
         Path.from_uri("bogus+unknown://bucket/key")
 
