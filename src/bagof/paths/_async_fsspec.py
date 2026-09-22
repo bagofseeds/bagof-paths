@@ -133,7 +133,7 @@ def _as_timestamp(value: tx.Any) -> float:
 
 
 def _stat_from_info(info: tx.Mapping[str, tx.Any]) -> os.stat_result:
-    """An `os.stat_result` synthesized from an fsspec info dict.
+    """An [os.stat_result][] synthesized from an fsspec info dict.
 
     Only size, type and modification time are meaningful on an object store;
     the rest are zero, as they are on `UPath`'s own synthesized stat.

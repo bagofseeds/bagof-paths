@@ -123,7 +123,7 @@ def with_segments(wrapper: tx.Any, *segments: tx.Any) -> tx.Any:
 
 
 def hardlink_to(wrapper: tx.Any, target: tx.Any) -> None:
-    """`hardlink_to` from `os.link` (pathlib gained it in 3.10).
+    """`hardlink_to` from [os.link][] (pathlib gained it in 3.10).
 
     Makes this path a new hard link to `target`. Hard links are a local
     filesystem operation, so a non-local driver without a native

@@ -14,7 +14,7 @@ from ._spec import BY_NAME
 
 
 class Path(PurePathMixin, BaseWrapper):
-    """A path that works like `pathlib.Path`, local or in the cloud.
+    """A path that works like [pathlib.Path][], local or in the cloud.
 
     Make one from a path string, a URL, or any path object:
 

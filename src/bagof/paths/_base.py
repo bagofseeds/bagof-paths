@@ -8,9 +8,9 @@ stray attributes; a subclass that adds state (a `read_only` flag, say)
 simply does not declare `__slots__` and gets a `__dict__` that
 `with_wrapped` carries onto every derived path.
 
-`BaseWrapper` does not inherit `os.PathLike`; because it defines
+`BaseWrapper` does not inherit [os.PathLike][]; because it defines
 `__fspath__`, `isinstance(path, os.PathLike)` is still true through
-`os.PathLike`'s subclass hook, and not inheriting is what lets the slots
+[os.PathLike][]'s subclass hook, and not inheriting is what lets the slots
 actually hold.
 
 The `protocol`/`path`/`drive`/`root`/`anchor` properties use
@@ -433,7 +433,7 @@ def _build_from_string(
 
     An explicit `driver` (a path class or `str -> path` callable) wins. A
     plain path or a `file://`/`local://` URI becomes a stdlib
-    `pathlib.Path`. A remote scheme, or an fsspec chain like
+    [pathlib.Path][]. A remote scheme, or an fsspec chain like
     `simplecache::s3://...`, is handed to driver selection.
 
     `storage_options` (endpoint, credentials, ...) are forwarded to the
