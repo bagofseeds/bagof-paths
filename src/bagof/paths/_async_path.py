@@ -1,19 +1,19 @@
 """The asynchronous path wrapper.
 
-``AsyncPath`` exposes the same surface as :class:`~bagof.paths.Path`, but its
+`AsyncPath` exposes the same surface as [`Path`][bagof.paths.Path], but its
 concrete, I/O-touching members are coroutines. It handles two kinds of driver:
 
-- a **synchronous** driver (``pathlib``, ``UPath``, ``cloudpathlib``) is run on
+- a **synchronous** driver (`pathlib`, `UPath`, `cloudpathlib`) is run on
   a sync view of the path in a worker thread, so the event loop is never
   stalled and the whole synchronous implementation -- engine, fallbacks,
   adapters -- is reused rather than written a second time;
 - a **natively asynchronous** driver (one whose methods are coroutines, such
-  as ``anyio.Path``) is awaited directly, with no thread. For the few members
-  such a driver does not have (``copy``, ``walk``, ...), a local stdlib view is
+  as `anyio.Path`) is awaited directly, with no thread. For the few members
+  such a driver does not have (`copy`, `walk`, ...), a local stdlib view is
   run in a thread as a fallback, so the whole surface still works.
 
 The pure-path (lexical) members are inherited unchanged: they never block, so
-they stay synchronous, exactly as on ``Path``.
+they stay synchronous, exactly as on `Path`.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ _WALK_DONE = object()
 
 
 def _accepts_kw(func: tx.Any, name: str) -> bool:
-    """Whether ``func`` declares a keyword parameter ``name``."""
+    """Whether `func` declares a keyword parameter `name`."""
     try:
         return name in inspect.signature(func).parameters
     except (TypeError, ValueError):
@@ -51,7 +51,7 @@ class AsyncFile:
 
     Each operation is one thread hop, so reads and writes on a blocking
     driver handle never stall the event loop. Use it as an async context
-    manager and iterate it with ``async for``.
+    manager and iterate it with `async for`.
     """
 
     def __init__(self, handle: tx.IO[tx.Any]) -> None:
@@ -91,9 +91,9 @@ class AsyncFile:
 class _NativeAsyncFile:
     """An async view over a file handle that is *already* asynchronous.
 
-    A native driver's ``open`` returns a handle whose reads and writes are
-    coroutines (``anyio``), or an async context manager that yields one
-    (``aiopath``). Either way its operations are awaited directly, with no
+    A native driver's `open` returns a handle whose reads and writes are
+    coroutines (`anyio`), or an async context manager that yields one
+    (`aiopath`). Either way its operations are awaited directly, with no
     thread. The context manager, when there is one, is held so that closing
     finalizes it.
     """
@@ -147,7 +147,7 @@ class _NativeAsyncFile:
 
 
 async def _adapt_async_file(opened: tx.Any) -> _NativeAsyncFile:
-    """Turn what a native driver's ``open`` returned into an async file."""
+    """Turn what a native driver's `open` returned into an async file."""
     if inspect.isawaitable(opened):
         # anyio: a coroutine that resolves to the handle.
         return _NativeAsyncFile(await opened)
@@ -163,12 +163,12 @@ def _maybe_async_driver(
     driver: tx.Any,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]],
 ) -> tx.Any:
-    """A natively-async driver for a remote URL, or ``None`` to fall back.
+    """A natively-async driver for a remote URL, or `None` to fall back.
 
-    Prefers an fsspec ``AsyncFileSystem`` when the URL names a scheme whose
-    installed backend is natively asynchronous. Returns ``None`` -- so the
+    Prefers an fsspec `AsyncFileSystem` when the URL names a scheme whose
+    installed backend is natively asynchronous. Returns `None` -- so the
     shared selection runs, wrapping a synchronous driver in a thread -- for an
-    explicit ``driver=``, a local path, an fsspec chain, or a scheme with no
+    explicit `driver=`, a local path, an fsspec chain, or a scheme with no
     async backend installed.
     """
     if driver is not None:
@@ -195,9 +195,10 @@ def _maybe_async_driver(
 
 
 class AsyncPath(PurePathMixin, BaseWrapper):
-    """The ``await`` version of :class:`Path`: the same methods, as coroutines.
+    """The `await` version of [`Path`][bagof.paths.Path]: the same
+    methods, as coroutines.
 
-    The parts that only describe a path (``name``, ``parent``, ``/``) stay
+    The parts that only describe a path (`name`, `parent`, `/`) stay
     plain; the parts that touch storage are awaited.
 
     ```pycon
@@ -236,7 +237,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         """The wrapped driver's member, when it is native and implements it.
 
         The copy/move/rmdir/walk members are not on the spec table, so they
-        do not travel through ``_call``/``_aiter``. This routes them to a
+        do not travel through `_call`/`_aiter`. This routes them to a
         native driver directly, leaving the synchronous-view bridge for a
         driver that lacks them.
         """
@@ -356,17 +357,17 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         return await self._call("is_symlink")
 
     async def stat(self, *, follow_symlinks: bool = True) -> os.stat_result:
-        """The result of ``stat`` on the path."""
+        """The result of `stat` on the path."""
         return await self._call(
             "stat", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def lstat(self) -> os.stat_result:
-        """Like :meth:`stat`, without following symbolic links."""
+        """Like `stat`, without following symbolic links."""
         return await self._call("lstat")
 
     async def samefile(self, other: tx.Any) -> bool:
-        """Whether the path and ``other`` refer to the same file."""
+        """Whether the path and `other` refer to the same file."""
         return await self._call("samefile", (other,))
 
     # -- extended status queries -------------------------------------------
@@ -405,7 +406,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     ) -> tx.Any:
         """Open the path and return an async file object.
 
-        Use it with ``async with`` / ``async for``. The handle's reads and
+        Use it with `async with` / `async for`. The handle's reads and
         writes are awaited directly on a native driver, or run in a worker
         thread on a synchronous one.
         """
@@ -445,7 +446,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         )
 
     async def write_bytes(self, data: tx.Any) -> int:
-        """Write ``data`` to the file as bytes, replacing any content."""
+        """Write `data` to the file as bytes, replacing any content."""
         return await self._call("write_bytes", (data,))
 
     async def write_text(
@@ -455,7 +456,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
     ) -> int:
-        """Write ``data`` to the file as text, replacing any content."""
+        """Write `data` to the file as text, replacing any content."""
         return await self._call(
             "write_text", (data,),
             {"encoding": encoding, "errors": errors, "newline": newline},
@@ -474,7 +475,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         case_sensitive: tx.Optional[bool] = None,
         recurse_symlinks: bool = False,
     ) -> tx.AsyncIterator[tx.Self]:
-        """Yield the paths matching ``pattern`` under this directory."""
+        """Yield the paths matching `pattern` under this directory."""
         async for item in self._aiter(
             "glob", (pattern,),
             {
@@ -491,7 +492,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         case_sensitive: tx.Optional[bool] = None,
         recurse_symlinks: bool = False,
     ) -> tx.AsyncIterator[tx.Self]:
-        """Like :meth:`glob`, recursively."""
+        """Like `glob`, recursively."""
         async for item in self._aiter(
             "rglob", (pattern,),
             {
@@ -539,7 +540,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy this file or directory to ``target``; return the new path."""
+        """Copy this file or directory to `target`; return the new path."""
         method = self._native_method("copy")
         if method is not None:
             return self.with_wrapped(await method(engine._unwrap(target)))
@@ -558,7 +559,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy into ``target_dir``, keeping this path's name."""
+        """Copy into `target_dir`, keeping this path's name."""
         method = self._native_method("copy_into")
         if method is not None:
             return self.with_wrapped(await method(engine._unwrap(target_dir)))
@@ -571,14 +572,14 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         )
 
     async def move(self, target: tx.Any) -> tx.Self:
-        """Move this path to ``target``; return the new path."""
+        """Move this path to `target`; return the new path."""
         method = self._native_method("move")
         if method is not None:
             return self.with_wrapped(await method(engine._unwrap(target)))
         return self._wrap(await bridge.run(self._sync().move, target))
 
     async def move_into(self, target_dir: tx.Any) -> tx.Self:
-        """Move into ``target_dir``, keeping this path's name."""
+        """Move into `target_dir`, keeping this path's name."""
         method = self._native_method("move_into")
         if method is not None:
             return self.with_wrapped(await method(engine._unwrap(target_dir)))
@@ -593,14 +594,14 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         on_error: tx.Optional[tx.Callable] = None,
         follow_symlinks: bool = False,
     ) -> tx.AsyncIterator[tx.Tuple[tx.Self, tx.List[str], tx.List[str]]]:
-        """Walk the tree, yielding ``(path, dirnames, filenames)`` per dir.
+        """Walk the tree, yielding `(path, dirnames, filenames)` per dir.
 
-        One directory per thread hop, so mutating ``dirnames`` in place to
+        One directory per thread hop, so mutating `dirnames` in place to
         prune the descent works exactly as it does on the sync wrapper. Note
-        that ``on_error`` runs in a worker thread.
+        that `on_error` runs in a worker thread.
 
         A natively-async driver walks on its own coroutine surface; pruning
-        by editing ``dirnames`` is not propagated there, since the driver
+        by editing `dirnames` is not propagated there, since the driver
         produced the whole level before it was yielded.
         """
         method = self._native_method("walk")
@@ -639,7 +640,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         return await self._call("absolute")
 
     async def expanduser(self) -> tx.Self:
-        """The path with a leading ``~`` expanded."""
+        """The path with a leading `~` expanded."""
         return await self._call("expanduser")
 
     async def readlink(self) -> tx.Self:
@@ -647,14 +648,14 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         return await self._call("readlink")
 
     async def rename(self, target: tx.Any) -> tx.Self:
-        """Rename the path to ``target`` and return the new path."""
+        """Rename the path to `target` and return the new path."""
         method = self._native_method("rename")
         if method is not None:
             return self.with_wrapped(await method(engine._unwrap(target)))
         return await self._call("rename", (self._coerce_target(target),))
 
     async def replace(self, target: tx.Any) -> tx.Self:
-        """Rename the path to ``target``, replacing any existing file."""
+        """Rename the path to `target`, replacing any existing file."""
         method = self._native_method("replace")
         if method is not None:
             return self.with_wrapped(await method(engine._unwrap(target)))
@@ -668,7 +669,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         )
 
     async def lchmod(self, mode: int) -> None:
-        """Like :meth:`chmod`, without following symbolic links."""
+        """Like `chmod`, without following symbolic links."""
         await self._call("lchmod", (mode,))
 
     async def owner(self, *, follow_symlinks: bool = True) -> str:
@@ -687,23 +688,23 @@ class AsyncPath(PurePathMixin, BaseWrapper):
     async def symlink_to(
         self, target: tx.Any, target_is_directory: bool = False
     ) -> None:
-        """Make this path a symbolic link to ``target``."""
+        """Make this path a symbolic link to `target`."""
         await self._call(
             "symlink_to", (target,),
             {"target_is_directory": target_is_directory},
         )
 
     async def hardlink_to(self, target: tx.Any) -> None:
-        """Make this path a hard link to ``target``."""
+        """Make this path a hard link to `target`."""
         await self._call("hardlink_to", (target,))
 
     async def link_to(self, target: tx.Any) -> None:
-        """Make ``target`` a hard link to this path.
+        """Make `target` a hard link to this path.
 
         .. deprecated::
-           ``link_to`` takes the *reverse* argument order of
-           :meth:`hardlink_to` and was removed from ``pathlib`` in Python
-           3.12. Prefer :meth:`hardlink_to`; this is kept, and synthesized
+           `link_to` takes the *reverse* argument order of
+           `hardlink_to` and was removed from `pathlib` in Python
+           3.12. Prefer `hardlink_to`; this is kept, and synthesized
            where the driver dropped it, only for backward compatibility.
         """
         await self._call("link_to", (target,))
@@ -714,11 +715,11 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         return await self._call("as_url", (), kwargs)
 
     async def download_to(self, destination: tx.Any) -> tx.Any:
-        """Download the path's contents to a local ``destination``."""
+        """Download the path's contents to a local `destination`."""
         return await self._call("download_to", (destination,))
 
     async def upload_from(self, source: tx.Any, **kwargs: tx.Any) -> tx.Any:
-        """Upload a local ``source`` to the path."""
+        """Upload a local `source` to the path."""
         return await self._call("upload_from", (source,), kwargs)
 
     async def clear_cache(self) -> None:
@@ -727,7 +728,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
 
     # -- recursive copy / remove aliases -----------------------------------
     async def rmtree(self) -> None:
-        """Remove the directory tree at the path. Alias of ``rmdir``."""
+        """Remove the directory tree at the path. Alias of `rmdir`."""
         await self.rmdir(recursive=True)
 
     async def copytree(
@@ -737,7 +738,7 @@ class AsyncPath(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy a directory tree to ``target``. Alias of ``copy``."""
+        """Copy a directory tree to `target`. Alias of `copy`."""
         return await self.copy(
             target,
             follow_symlinks=follow_symlinks,

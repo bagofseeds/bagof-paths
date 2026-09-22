@@ -1,6 +1,6 @@
 """The member table: the pathlib surface described once.
 
-Each :class:`Member` says how one pathlib member is delegated, what its
+Each `Member` says how one pathlib member is delegated, what its
 result should become, and (in later phases) how it is synthesized when the
 wrapped object lacks it. Both the sync and the async wrapper read this table,
 so the surface stays defined in exactly one place.

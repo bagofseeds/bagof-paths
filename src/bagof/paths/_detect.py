@@ -1,8 +1,8 @@
 """Whether a wrapped driver's members are coroutines.
 
-A driver is *async* when its I/O members are coroutines (``anyio.Path``,
-``trio.Path``, ...). This is a property of the driver class, so it is worked
-out once and cached. ``AsyncPath`` awaits such a driver directly; ``Path``
+A driver is *async* when its I/O members are coroutines (`anyio.Path`,
+`trio.Path`, ...). This is a property of the driver class, so it is worked
+out once and cached. `AsyncPath` awaits such a driver directly; `Path`
 refuses it (a synchronous method returning an un-awaited coroutine is a trap).
 """
 
@@ -27,7 +27,7 @@ def _probe(wrapped: tx.Any) -> bool:
 
 
 def is_async_driver(wrapped: tx.Any) -> bool:
-    """Whether ``wrapped``'s members are coroutines (cached by type)."""
+    """Whether `wrapped`'s members are coroutines (cached by type)."""
     kind = type(wrapped)
     cached = _CACHE.get(kind)
     if cached is None:

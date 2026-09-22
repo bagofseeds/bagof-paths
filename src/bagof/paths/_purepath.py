@@ -1,7 +1,7 @@
 """The pure-path surface, shared by the sync and async wrappers.
 
 These members are lexical: they never touch a filesystem and never block, so
-they are the same synchronous methods on ``Path`` and ``AsyncPath`` alike.
+they are the same synchronous methods on `Path` and `AsyncPath` alike.
 The two wrappers differ only in the concrete, I/O-touching surface.
 """
 
@@ -62,15 +62,15 @@ class PurePathMixin:
         return engine.invoke(self, BY_NAME["joinpath"], segments)
 
     def with_name(self, name: str) -> tx.Self:
-        """A new path with the final component changed to ``name``."""
+        """A new path with the final component changed to `name`."""
         return engine.invoke(self, BY_NAME["with_name"], (name,))
 
     def with_stem(self, stem: str) -> tx.Self:
-        """A new path with the stem changed to ``stem``."""
+        """A new path with the stem changed to `stem`."""
         return engine.invoke(self, BY_NAME["with_stem"], (stem,))
 
     def with_suffix(self, suffix: str) -> tx.Self:
-        """A new path with the suffix changed to ``suffix``."""
+        """A new path with the suffix changed to `suffix`."""
         return engine.invoke(self, BY_NAME["with_suffix"], (suffix,))
 
     def with_segments(self, *segments: tx.Any) -> tx.Self:
@@ -98,11 +98,11 @@ class PurePathMixin:
         return engine.invoke(self, BY_NAME["is_absolute"])
 
     def is_relative_to(self, other: tx.Any) -> bool:
-        """Whether the path is relative to ``other``."""
+        """Whether the path is relative to `other`."""
         return engine.invoke(self, BY_NAME["is_relative_to"], (other,))
 
     def relative_to(self, other: tx.Any, *, walk_up: bool = False) -> tx.Self:
-        """The path made relative to ``other``."""
+        """The path made relative to `other`."""
         return engine.invoke(
             self, BY_NAME["relative_to"], (other,), {"walk_up": walk_up}
         )
@@ -110,7 +110,7 @@ class PurePathMixin:
     def match(
         self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
     ) -> bool:
-        """Whether the path matches ``pattern``, anchored from the right.
+        """Whether the path matches `pattern`, anchored from the right.
 
         Matching is lexical and consistent across drivers: it runs on the
         canonical path, not on the wrapped object.
@@ -120,7 +120,7 @@ class PurePathMixin:
     def full_match(
         self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
     ) -> bool:
-        """Whether the whole path matches ``pattern`` (``**`` spans segments).
+        """Whether the whole path matches `pattern` (`**` spans segments).
 
         Uses CPython 3.13's glob semantics on every interpreter.
         """

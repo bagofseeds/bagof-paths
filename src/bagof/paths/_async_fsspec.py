@@ -1,21 +1,21 @@
-"""A natively-async path over an fsspec ``AsyncFileSystem``.
+"""A natively-async path over an fsspec `AsyncFileSystem`.
 
-This is the driver behind an async cloud path: ``AsyncPath("s3://...")`` with a
+This is the driver behind an async cloud path: `AsyncPath("s3://...")` with a
 real coroutine I/O surface, rather than a synchronous driver run in a worker
 thread. It maps the pathlib surface onto fsspec's own async methods
-(``_cat_file``, ``_pipe_file``, ``_ls``, ``_info``, ``_walk``, ...).
+(`_cat_file`, `_pipe_file`, `_ls`, `_info`, `_walk`, ...).
 
-The path is a **wrapped driver object**, not a wrapper itself: ``AsyncPath``
-holds one of these in ``_wrapped`` and reaches it through the native-async
+The path is a **wrapped driver object**, not a wrapper itself: `AsyncPath`
+holds one of these in `_wrapped` and reaches it through the native-async
 seam. So this class presents the shape that seam expects -- synchronous
-lexical members (``name``, ``parent``, ``/``) and coroutine I/O members whose
+lexical members (`name`, `parent`, `/`) and coroutine I/O members whose
 names match the pathlib surface.
 
 The filesystem is resolved **per running event loop**, not captured once:
 fsspec's own instance cache is keyed by options and thread, not by loop, so a
 session built under one loop is dead under another. Each operation asks for the
 filesystem for the loop it is running on, building one (with
-``skip_instance_cache=True``) the first time and caching it weakly against that
+`skip_instance_cache=True`) the first time and caching it weakly against that
 loop.
 
 fsspec is an optional dependency, imported lazily: importing this module never
@@ -50,7 +50,7 @@ _LOCK_KEY = object()
 def _freeze(value: tx.Any) -> tx.Any:
     """A hashable stand-in for storage options, for use as a cache key.
 
-    Distinct-but-equal-``repr`` objects (two credential objects, say) must
+    Distinct-but-equal-`repr` objects (two credential objects, say) must
     not collide, or one caller would be handed a filesystem built for
     another's credentials -- so an unhashable leaf falls back to its
     *identity*, which only ever causes a cache miss (a fresh, correct
@@ -80,7 +80,7 @@ def _filesystem_class(scheme: str) -> tx.Any:
 
 
 def is_async_filesystem(scheme: str) -> bool:
-    """Whether the installed fsspec backend for ``scheme`` is natively async.
+    """Whether the installed fsspec backend for `scheme` is natively async.
 
     Answered from the class, so it needs no filesystem instance and no event
     loop. A scheme with no installed backend is not async.
@@ -94,10 +94,10 @@ def is_async_filesystem(scheme: str) -> bool:
 def _strip(scheme: str, url: str) -> str:
     """The filesystem path of a URL, by the backend's own convention.
 
-    Uses the backend's ``_strip_protocol`` (a classmethod on every fsspec
-    filesystem), so ``s3://bucket/key`` becomes ``bucket/key`` and a leading
+    Uses the backend's `_strip_protocol` (a classmethod on every fsspec
+    filesystem), so `s3://bucket/key` becomes `bucket/key` and a leading
     slash is added or not exactly as that backend expects -- and exactly as
-    ``UPath`` does it, so the two agree on identity. Falls back to a lexical
+    `UPath` does it, so the two agree on identity. Falls back to a lexical
     strip if the backend cannot answer without an instance.
     """
     try:
@@ -133,10 +133,10 @@ def _as_timestamp(value: tx.Any) -> float:
 
 
 def _stat_from_info(info: tx.Mapping[str, tx.Any]) -> os.stat_result:
-    """An ``os.stat_result`` synthesized from an fsspec info dict.
+    """An `os.stat_result` synthesized from an fsspec info dict.
 
     Only size, type and modification time are meaningful on an object store;
-    the rest are zero, as they are on ``UPath``'s own synthesized stat.
+    the rest are zero, as they are on `UPath`'s own synthesized stat.
     """
     size = int(info.get("size") or 0)
     is_dir = info.get("type") == "directory"
@@ -203,12 +203,12 @@ async def _resolve_fs(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
 
 
 class _AsyncFSFile:
-    """A minimal async file over ``_cat_file`` / ``_pipe_file``.
+    """A minimal async file over `_cat_file` / `_pipe_file`.
 
-    fsspec's own ``open_async`` is per-backend and refuses text modes, so the
+    fsspec's own `open_async` is per-backend and refuses text modes, so the
     read/write surface is synthesized: a read loads the object once, a write
-    buffers and is flushed to the store on close. The buffer is a ``StringIO``
-    in text mode and a ``BytesIO`` in binary mode, so a chunked text read
+    buffers and is flushed to the store on close. The buffer is a `StringIO`
+    in text mode and a `BytesIO` in binary mode, so a chunked text read
     never splits a multi-byte character.
     """
 
@@ -252,7 +252,7 @@ class _AsyncFSFile:
 
 
 class AsyncFSPath:
-    """A path on an fsspec async filesystem, wrapped by ``AsyncPath``."""
+    """A path on an fsspec async filesystem, wrapped by `AsyncPath`."""
 
     __slots__ = ("_scheme", "_path", "_options", "_pure")
 
@@ -619,7 +619,7 @@ class AsyncFSPath:
         return str(self._pure.parent / text)
 
     def _into(self, target_dir: tx.Any) -> AsyncFSPath:
-        """This path's name placed inside ``target_dir`` (for *_into)."""
+        """This path's name placed inside `target_dir` (for *_into)."""
         if isinstance(target_dir, AsyncFSPath):
             self._check_scheme(target_dir._scheme)
             return target_dir._derive(target_dir._pure / self._pure.name)

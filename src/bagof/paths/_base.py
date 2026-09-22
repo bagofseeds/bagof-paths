@@ -1,21 +1,21 @@
 """The base wrapper: composition, identity, derivation, and the location
 properties that must read the same across drivers.
 
-``BaseWrapper`` holds the wrapped path in ``_wrapped`` and delegates to it.
-It is slotted, and the concrete wrappers (``Path``/``AsyncPath``) add
-``__slots__ = ()`` so a plain wrapper carries no ``__dict__`` and rejects
-stray attributes; a subclass that adds state (a ``read_only`` flag, say)
-simply does not declare ``__slots__`` and gets a ``__dict__`` that
-:meth:`with_wrapped` carries onto every derived path.
+`BaseWrapper` holds the wrapped path in `_wrapped` and delegates to it.
+It is slotted, and the concrete wrappers (`Path`/`AsyncPath`) add
+`__slots__ = ()` so a plain wrapper carries no `__dict__` and rejects
+stray attributes; a subclass that adds state (a `read_only` flag, say)
+simply does not declare `__slots__` and gets a `__dict__` that
+`with_wrapped` carries onto every derived path.
 
-``BaseWrapper`` does not inherit :class:`os.PathLike`; because it defines
-``__fspath__``, ``isinstance(path, os.PathLike)`` is still true through
-``os.PathLike``'s subclass hook, and not inheriting is what lets the slots
+`BaseWrapper` does not inherit `os.PathLike`; because it defines
+`__fspath__`, `isinstance(path, os.PathLike)` is still true through
+`os.PathLike`'s subclass hook, and not inheriting is what lets the slots
 actually hold.
 
-The ``protocol``/``path``/``drive``/``root``/``anchor`` properties use
+The `protocol`/`path`/`drive`/`root`/`anchor` properties use
 generic duck-typing that works on any path-like object -- trust a matching
-string attribute, else parse the URL scheme out of ``str()``; the driver
+string attribute, else parse the URL scheme out of `str()`; the driver
 adapter layer refines them for the known drivers that diverge.
 """
 
@@ -65,9 +65,9 @@ class BaseWrapper:
         ----------
         path:
             A path-like object to wrap as it is, or a string. A plain string
-            is a local path; a ``scheme://`` URL selects a driver.
+            is a local path; a `scheme://` URL selects a driver.
         driver:
-            For a URL string, a path class or ``str -> path`` factory to use
+            For a URL string, a path class or `str -> path` factory to use
             instead of the automatic selection. Not valid for a path object.
         storage_options:
             For a URL string, connection options (endpoint, credentials, ...)
@@ -113,7 +113,7 @@ class BaseWrapper:
     ) -> tx.Any:
         """Build the wrapped driver for a URL/path string.
 
-        The default is the shared selection. ``AsyncPath`` overrides this to
+        The default is the shared selection. `AsyncPath` overrides this to
         prefer a natively-async driver for a remote URL before falling back
         to the shared selection (a synchronous driver run in a thread).
         """
@@ -138,9 +138,9 @@ class BaseWrapper:
     def from_uri(cls, uri: str) -> tx.Self:
         """A path from a URI.
 
-        A ``file://`` URI becomes a local path; a URI of another scheme is
+        A `file://` URI becomes a local path; a URI of another scheme is
         built through the ordinary constructor's driver selection, so
-        ``Path.from_uri("s3://...")`` and ``Path("s3://...")`` agree.
+        `Path.from_uri("s3://...")` and `Path("s3://...")` agree.
         """
         match = SCHEME_RE.match(uri)
         scheme = match.group(1).lower() if match else ""
@@ -170,7 +170,7 @@ class BaseWrapper:
 
     # -- capability introspection ------------------------------------------
     def supports(self, name: str) -> bool:
-        """Whether ``name`` is wired for this path.
+        """Whether `name` is wired for this path.
 
         Answers "is this operation available" -- by delegation or by a
         synthesized fallback -- not "will a call succeed on this particular
@@ -225,12 +225,12 @@ class BaseWrapper:
 
     # -- derivation ---------------------------------------------------------
     def with_wrapped(self, wrapped: tx.Any) -> tx.Self:
-        """Return a path of this wrapper's own type around ``wrapped``.
+        """Return a path of this wrapper's own type around `wrapped`.
 
-        Every internal operation that produces a new path (``parent``,
-        ``joinpath``, ``/``, ...) goes through here, so a subclass's extra
+        Every internal operation that produces a new path (`parent`,
+        `joinpath`, `/`, ...) goes through here, so a subclass's extra
         state is preserved on derived paths. State is carried by a shallow
-        copy (like ``dataclasses.replace``); a subclass holding *mutable*
+        copy (like `dataclasses.replace`); a subclass holding *mutable*
         state that derived paths must not share should override this.
         """
         new = copy.copy(self)
@@ -265,7 +265,7 @@ class BaseWrapper:
     # -- location (generic; refined per-driver by the adapter layer) --------
     @property
     def protocol(self) -> str:
-        """The URL scheme, or ``""`` for a local path."""
+        """The URL scheme, or `""` for a local path."""
         value = getattr(self._wrapped, "protocol", None)
         if isinstance(value, str):
             return value
@@ -284,13 +284,13 @@ class BaseWrapper:
 
     @property
     def drive(self) -> str:
-        """The drive (or bucket), or ``""`` when there is none."""
+        """The drive (or bucket), or `""` when there is none."""
         value = getattr(self._wrapped, "drive", None)
         return value if isinstance(value, str) else ""
 
     @property
     def root(self) -> str:
-        """The root, or ``""`` when there is none."""
+        """The root, or `""` when there is none."""
         value = getattr(self._wrapped, "root", None)
         return value if isinstance(value, str) else ""
 
@@ -330,7 +330,7 @@ class BaseWrapper:
         """The bucket the path lives in.
 
         Delegated to the driver where it has one (cloudpathlib), else derived
-        from the drive of a bucketed protocol (``s3``, ``gs``, ``az``, ...);
+        from the drive of a bucketed protocol (`s3`, `gs`, `az`, ...);
         a non-bucketed protocol (local, memory) has no bucket and raises.
         """
         value = getattr(self._wrapped, "bucket", _MISSING)
@@ -359,7 +359,7 @@ class BaseWrapper:
 
     @property
     def cloud_prefix(self) -> tx.Any:
-        """The scheme prefix of the cloud path, e.g. ``"s3://"``."""
+        """The scheme prefix of the cloud path, e.g. `"s3://"`."""
         return self._delegate_attr("cloud_prefix")
 
     @property
@@ -429,16 +429,16 @@ def _build_from_string(
     driver: tx.Any,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> tx.Any:
-    """Turn a string into a driver path: local, selected, or via ``driver=``.
+    """Turn a string into a driver path: local, selected, or via `driver=`.
 
-    An explicit ``driver`` (a path class or ``str -> path`` callable) wins. A
-    plain path or a ``file://``/``local://`` URI becomes a stdlib
-    ``pathlib.Path``. A remote scheme, or an fsspec chain like
-    ``simplecache::s3://...``, is handed to driver selection.
+    An explicit `driver` (a path class or `str -> path` callable) wins. A
+    plain path or a `file://`/`local://` URI becomes a stdlib
+    `pathlib.Path`. A remote scheme, or an fsspec chain like
+    `simplecache::s3://...`, is handed to driver selection.
 
-    ``storage_options`` (endpoint, credentials, ...) are forwarded to the
+    `storage_options` (endpoint, credentials, ...) are forwarded to the
     driver. They apply only to a remote URL: a local path has nowhere to send
-    them, and passing them for one is a ``TypeError``.
+    them, and passing them for one is a `TypeError`.
     """
     match = SCHEME_RE.match(text)
     scheme = match.group(1).lower() if match is not None else ""
@@ -477,7 +477,7 @@ def _reject_local_storage_options(
 
 
 def _local_from_url(text: str, scheme: str) -> LocalPath:
-    """A local path from a ``file://`` / ``local://`` URL, on any version."""
+    """A local path from a `file://` / `local://` URL, on any version."""
     from urllib.parse import urlparse
     from urllib.request import url2pathname
 
@@ -489,9 +489,9 @@ def _local_from_url(text: str, scheme: str) -> LocalPath:
 
 
 def _local_from_file_uri(uri: str) -> LocalPath:  # pragma: no cover
-    """Build a local path from a ``file://`` URI on pathlib < 3.13.
+    """Build a local path from a `file://` URI on pathlib < 3.13.
 
-    Only the ``file`` scheme maps to a local path; anything else needs a
+    Only the `file` scheme maps to a local path; anything else needs a
     driver to interpret it and is refused, the way the constructor refuses a
     scheme-ful string.
     """
@@ -509,12 +509,12 @@ def _local_from_file_uri(uri: str) -> LocalPath:  # pragma: no cover
 
 
 def _is_path_shaped(obj: tx.Any) -> bool:
-    """Whether ``obj`` looks enough like a path to wrap.
+    """Whether `obj` looks enough like a path to wrap.
 
-    Deliberately lenient: the flagship non-local ``UPath`` refuses
-    ``__fspath__``, so gating on that would reject the very drivers this
-    package exists for. Any object that walks like a path -- ``__fspath__``,
-    ``parts``, or ``path`` -- is accepted, and unsupported members degrade
+    Deliberately lenient: the flagship non-local `UPath` refuses
+    `__fspath__`, so gating on that would reject the very drivers this
+    package exists for. Any object that walks like a path -- `__fspath__`,
+    `parts`, or `path` -- is accepted, and unsupported members degrade
     one at a time rather than at construction.
     """
     return (

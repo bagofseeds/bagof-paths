@@ -22,7 +22,7 @@ _MISSING = object()
 def _raise_unsupported(wrapper: BaseWrapper, name: str) -> tx.NoReturn:
     """Raise for a member that can be neither delegated nor synthesized.
 
-    A driver may offer an ``_unsupported_hint`` string that explains the
+    A driver may offer an `_unsupported_hint` string that explains the
     remedy (a backendless remote path uses this to point at installing a
     backend); it is added to the message when present.
     """

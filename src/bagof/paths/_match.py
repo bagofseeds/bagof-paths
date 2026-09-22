@@ -1,14 +1,14 @@
-"""Glob matching for ``match`` / ``full_match``.
+"""Glob matching for `match` / `full_match`.
 
-``full_match`` needs CPython 3.13's ``**``-aware, whole-path glob semantics on
+`full_match` needs CPython 3.13's `**`-aware, whole-path glob semantics on
 every supported interpreter, so the two translation helpers below are adapted
-from CPython 3.13's ``glob.translate`` and ``fnmatch._translate`` (PSF
-license; see ``LICENSE-PSF-2.0.txt`` and ``NOTICE.md``). They are reformatted
+from CPython 3.13's `glob.translate` and `fnmatch._translate` (PSF
+license; see `LICENSE-PSF-2.0.txt` and `NOTICE.md`). They are reformatted
 to this repository's style and given type annotations, but the logic is
 unchanged. Matching runs on the wrapper's canonical, scheme-less path with
-``/`` separators, so it behaves identically regardless of the wrapped driver.
+`/` separators, so it behaves identically regardless of the wrapped driver.
 
-``match`` (right-anchored) delegates to the stdlib ``PurePosixPath.match``,
+`match` (right-anchored) delegates to the stdlib `PurePosixPath.match`,
 which exists on every supported version.
 """
 
@@ -28,7 +28,7 @@ _SEP = "/"
 def _fnmatch_translate(
     pat: str, star: str, question_mark: str
 ) -> tx.List[str]:
-    """Adapted from CPython 3.13 ``fnmatch._translate``."""
+    """Adapted from CPython 3.13 `fnmatch._translate`."""
     res = []
     add = res.append
     i, n = 0, len(pat)
@@ -109,7 +109,7 @@ def _glob_translate(
     include_hidden: bool = False,
     seps: tx.Optional[str] = None,
 ) -> str:
-    """Adapted from CPython 3.13 ``glob.translate``."""
+    """Adapted from CPython 3.13 `glob.translate`."""
     if not seps:
         if os.path.altsep:
             seps = (os.path.sep, os.path.altsep)
@@ -157,7 +157,7 @@ def _glob_translate(
 
 
 def _normalize(text: str) -> str:
-    """Collapse ``//`` and drop ``.`` segments, the way PurePath parsing does.
+    """Collapse `//` and drop `.` segments, the way PurePath parsing does.
 
     pathlib's full_match routes both the path and the pattern through a
     PurePath before matching; mirroring that keeps us identical to it.
@@ -170,7 +170,7 @@ def _normalize(text: str) -> str:
 def full_match(
     path: str, pattern: str, *, case_sensitive: tx.Optional[bool] = None
 ) -> bool:
-    """Whether the whole ``path`` matches ``pattern`` (``**`` spans segments).
+    """Whether the whole `path` matches `pattern` (`**` spans segments).
 
     Uses CPython 3.13's glob semantics on every interpreter. Patterns are
     trusted input -- a pathological pattern can backtrack, exactly as the
@@ -186,7 +186,7 @@ def full_match(
 def match(
     path: str, pattern: str, *, case_sensitive: tx.Optional[bool] = None
 ) -> bool:
-    """Whether ``path`` matches ``pattern``, anchored from the right."""
+    """Whether `path` matches `pattern`, anchored from the right."""
     pure = PurePosixPath(path)
     if case_sensitive is None:
         return pure.match(pattern)

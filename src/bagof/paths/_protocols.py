@@ -4,10 +4,11 @@ A scheme's *behaviour* is data, not a class (see the design's construction
 section): whether its first path component is a bucket, which spellings name
 the same store, whether it is always absolute, and which driver to prefer when
 building one. The base wrapper and the driver selector read this registry; a
-downstream adds a protocol with one :func:`register_protocol` call rather than
+downstream adds a protocol with one
+[`register_protocol`][bagof.paths.register_protocol] call rather than
 a subclass.
 
-``ProtocolTraits`` takes keyword arguments only, so a new trait can be added
+`ProtocolTraits` takes keyword arguments only, so a new trait can be added
 later without shifting a positional and breaking a caller. Register protocols
 at import time: traits participate in a path's identity (alias folding in the
 canonical key), so registering after paths are already hashed into a dict
@@ -25,19 +26,19 @@ class ProtocolTraits:
     Parameters
     ----------
     bucketed:
-        The first path component is a bucket/container -- drives ``bucket``
+        The first path component is a bucket/container -- drives `bucket`
         and the drive/root split.
     absolute:
         Paths of this scheme are always absolute (most remote stores).
     aliases:
-        Other schemes that name the same store (``s3a`` for ``s3``); folded
+        Other schemes that name the same store (`s3a` for `s3`); folded
         onto this scheme for identity so the spellings compare equal.
     driver:
-        A preferred factory (a driver class, or a ``str -> path`` callable)
+        A preferred factory (a driver class, or a `str -> path` callable)
         used to build a path of this scheme before the availability order.
     storage_options:
         Default connection options (endpoint, credentials, ...) forwarded to
-        the driver for every path of this scheme. Per-call ``storage_options``
+        the driver for every path of this scheme. Per-call `storage_options`
         override these key by key. Held as data and never printed -- these
         commonly hold secrets.
     """
@@ -99,19 +100,20 @@ def register_protocol(
     driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> None:
-    """Register (or replace) the traits for a URL ``scheme``.
+    """Register (or replace) the traits for a URL `scheme`.
 
     A later registration **replaces an earlier one wholesale**: any trait not
     passed reverts to its default, aliases and all. Use this to *define* a
     scheme, not to tweak one. In particular, re-registering a built-in scheme
-    (``s3``, ``gs``, ``az``) to add ``storage_options`` would drop its
-    ``bucketed``/``absolute`` traits and detach its aliases -- to attach
+    (`s3`, `gs`, `az`) to add `storage_options` would drop its
+    `bucketed`/`absolute` traits and detach its aliases -- to attach
     connection options to a scheme that already exists, use
-    :func:`set_storage_options`, which keeps the other traits.
+    [`set_storage_options`][bagof.paths.set_storage_options], which
+    keeps the other traits.
 
-    ``storage_options`` gives default connection options (endpoint,
+    `storage_options` gives default connection options (endpoint,
     credentials, ...) forwarded to the driver for every path of this scheme;
-    a per-call ``storage_options`` overrides them key by key.
+    a per-call `storage_options` overrides them key by key.
 
     Register at import time -- see the module note on identity.
     """
@@ -146,16 +148,17 @@ def set_storage_options(
     scheme: str,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> None:
-    """Set the default connection options for a URL ``scheme``.
+    """Set the default connection options for a URL `scheme`.
 
-    Unlike :func:`register_protocol`, this keeps the scheme's other traits
-    (``bucketed``, ``aliases``, the preferred driver). It is the way to attach
+    Unlike [`register_protocol`][bagof.paths.register_protocol], this
+    keeps the scheme's other traits
+    (`bucketed`, `aliases`, the preferred driver). It is the way to attach
     an endpoint or credentials to a scheme that is already understood::
 
         set_storage_options("s3", {"endpoint_url": "https://minio.local"})
 
     The options replace this scheme's current defaults; a per-call
-    ``storage_options`` on the constructor still overrides them key by key.
+    `storage_options` on the constructor still overrides them key by key.
     Setting them on an alias sets them on the store it names. Call at import
     time -- see the module note on identity.
     """
@@ -190,7 +193,7 @@ def canonical_scheme(scheme: str) -> str:
 
 
 def traits_for(scheme: str) -> ProtocolTraits:
-    """The traits for ``scheme`` (following aliases); a default when unknown.
+    """The traits for `scheme` (following aliases); a default when unknown.
 
     An unregistered scheme still wraps -- it gets the default traits
     (not bucketed, not always-absolute) and degrades per member.

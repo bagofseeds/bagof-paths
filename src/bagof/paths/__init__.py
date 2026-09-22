@@ -1,6 +1,6 @@
 """One path API for local files and the cloud.
 
-Works like ``pathlib.Path`` over a local path, a ``UPath``, a cloud path, or
+Works like `pathlib.Path` over a local path, a `UPath`, a cloud path, or
 any path object. The public names are re-exported here; every other module is
 private.
 """
