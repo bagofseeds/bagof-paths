@@ -8,6 +8,7 @@ nav = [
   {"Comparison" = "comparison.md"},
   {"API" = [
     "api/index.md",
+    {"PurePath" = "api/pure.md"},
     {"AsyncPath" = "api/async.md"},
     {"Registration" = "api/registration.md"},
   ]},

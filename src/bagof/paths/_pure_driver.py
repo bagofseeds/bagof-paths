@@ -3,26 +3,26 @@
 This is the driver behind a path that has no installed backend: it implements
 only the lexical (pure) surface, entirely with the standard library, so a
 remote URL can be parsed and manipulated with neither universal-pathlib nor
-cloudpathlib present. ``AsyncFSPath`` is the shape precedent -- lexical members
-over a :class:`~pathlib.PurePosixPath`.
+cloudpathlib present. `AsyncFSPath` is the shape precedent -- lexical members
+over a `PurePosixPath`.
 
-The path is a **wrapped driver object**, not a wrapper itself. ``Path`` (or the
-public ``PurePath``) holds one in ``_wrapped`` and delegates to it through the
-engine, exactly as it does a ``UPath`` or a ``CloudPath``. So this class
+The path is a **wrapped driver object**, not a wrapper itself. `Path` (or the
+public `PurePath`) holds one in `_wrapped` and delegates to it through the
+engine, exactly as it does a `UPath` or a `CloudPath`. So this class
 presents the shape the engine expects: the location attributes
-(``protocol``/``path``/``drive``/``root``), the lexical members
-(``name``/``parent``/``joinpath``/``/`` ...), and a ``str()`` that reassembles
+(`protocol`/`path`/`drive`/`root`), the lexical members
+(`name`/`parent`/`joinpath`/`/` ...), and a `str()` that reassembles
 the URL.
 
 The location split follows universal-pathlib exactly, so a path built here
 compares and hashes equal to the same URL built on a real backend. For a
 bucketed scheme the first component is the drive and the remainder is an
 absolute key path, so a bucket root normalizes to a trailing slash
-(``s3://bucket`` has path ``bucket/``) and the parent of a bucket root is the
+(`s3://bucket` has path `bucket/`) and the parent of a bucket root is the
 bucket root again.
 
-A lexical member is delegated to the wrapped ``PurePosixPath``, so its
-normalization is the standard library's. A ``.`` segment and a doubled slash
+A lexical member is delegated to the wrapped `PurePosixPath`, so its
+normalization is the standard library's. A `.` segment and a doubled slash
 are collapsed, which universal-pathlib preserves. Ordinary keys, which contain
 neither, are unaffected.
 """
@@ -62,7 +62,7 @@ class PureCloudPath:
     This class carries the URL scheme, the drive (the bucket, for a bucketed
     scheme), and the key path. It exposes the same location attributes and
     lexical members a real backend would, and it reassembles the URL in
-    ``str()``. It implements no I/O; an I/O member raises through the engine
+    `str()`. It implements no I/O; an I/O member raises through the engine
     with a hint to install a backend.
     """
 
@@ -92,7 +92,7 @@ class PureCloudPath:
         return cls(scheme, drive, pure, options)
 
     def _derive(self, pure: PurePosixPath) -> PureCloudPath:
-        """A sibling path with the same scheme and drive, at ``pure``."""
+        """A sibling path with the same scheme and drive, at `pure`."""
         return PureCloudPath(self._scheme, self._drive, pure, self._options)
 
     # -- location ----------------------------------------------------------
@@ -185,7 +185,7 @@ class PureCloudPath:
         """The whole location as one path, so the drive joins the comparison.
 
         A bucketed key alone would compare relative to a key in a different
-        bucket, so ``relative_to`` folds the drive into an absolute path and
+        bucket, so `relative_to` folds the drive into an absolute path and
         compares those.
         """
         if self._pure.is_absolute():

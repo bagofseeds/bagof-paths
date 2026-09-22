@@ -1,12 +1,10 @@
 """The public pure-path type.
 
-``PurePath`` is the lexical counterpart of ``Path``. It shares the whole
-lexical surface (:class:`~bagof.paths._purepath.PurePathMixin`) and the
-location and identity machinery (:class:`~bagof.paths._base.BaseWrapper`), but
-adds none of the I/O methods, so it is the pure level of the same path model.
-A local string is wrapped as a stdlib pure path, a remote URL as the
-dependency-free lexical cloud driver, and an existing driver object as its own
-lexical view.
+`PurePath` is the lexical counterpart of `Path`. It shares the whole lexical
+surface and the location and identity machinery, but adds none of the I/O
+methods, so it is the pure level of the same path model. A local string is
+wrapped as a stdlib pure path, a remote URL as the dependency-free lexical
+cloud driver, and an existing driver object as its own lexical view.
 """
 
 from __future__ import annotations
@@ -30,15 +28,15 @@ from ._purepath import PurePathMixin
 class PurePath(PurePathMixin, BaseWrapper):
     """A path for lexical operations only, local or in the cloud.
 
-    A ``PurePath`` parses and manipulates a path without touching any
-    filesystem. It provides the lexical surface -- ``name``, ``parent``,
-    ``suffix``, ``joinpath``, ``with_name``, and the rest -- together with the
-    location properties ``protocol``, ``path``, ``drive``, and ``root``. It has
-    no reading, writing, listing, or other I/O methods.
+    A `PurePath` parses and manipulates a path without touching any filesystem.
+    It provides the lexical surface -- `name`, `parent`, `suffix`, `joinpath`,
+    `with_name`, and the rest -- together with the location properties
+    `protocol`, `path`, `drive`, and `root`. It has no reading, writing,
+    listing, or other I/O methods.
 
     A remote URL is understood with no backend installed, so a cloud location
-    can be taken apart and rebuilt without ``universal-pathlib`` or
-    ``cloudpathlib``.
+    can be taken apart and rebuilt without `universal-pathlib` or
+    `cloudpathlib`.
 
     ```pycon
     >>> from bagof.paths import PurePath
@@ -51,9 +49,10 @@ class PurePath(PurePathMixin, BaseWrapper):
     '.zarr'
     ```
 
-    A ``PurePath`` and a ``Path`` for the same location compare equal and hash
-    alike, so one serves to look the other up in a set or a dictionary. This
-    mirrors ``pathlib``, where a ``PurePath`` equals the ``Path`` beside it.
+    A `PurePath` and a [`Path`][bagof.paths.Path] for the same location compare
+    equal and hash alike, so one serves to look the other up in a set or a
+    dictionary. This mirrors `pathlib`, where a pure path equals the full path
+    beside it.
     """
 
     __slots__ = ()
@@ -67,7 +66,7 @@ class PurePath(PurePathMixin, BaseWrapper):
         """Build the wrapped object for a URL or path string.
 
         A local path becomes a stdlib pure path. A remote URL becomes the
-        lexical cloud driver, which needs no backend. An explicit ``driver``
+        lexical cloud driver, which needs no backend. An explicit `driver`
         still builds a real driver object, whose own lexical view is wrapped.
         """
         if driver is not None:
