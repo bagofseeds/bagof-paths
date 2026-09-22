@@ -22,7 +22,11 @@ member of that surface it does one of three things:
 
 Anything a driver exposes that the surface does not name is still reachable
 through `path.wrapped`. A sync `Path` and an async `AsyncPath` share the whole
-surface; `AsyncPath` runs a synchronous driver in a worker thread.
+surface; `AsyncPath` runs a synchronous driver in a worker thread. A third
+front-end, `PurePath`, exposes only the lexical surface (no I/O), and a remote
+URL is parsed with no backend installed -- the same lexical driver also backs
+`Path` as the no-backend fallback, so a lexical operation works and only an I/O
+call raises.
 
 ## Layout
 
@@ -48,6 +52,9 @@ src/bagof/paths/
   _detect.py     # is_async_driver: whether a driver's members are coroutines
   _select.py     # driver selection: build a backend from a URL string
   _purepath.py   # PurePathMixin: the lexical surface, shared sync by both
+  _pure_driver.py # PureCloudPath: the dependency-free lexical driver for a
+                 #   remote URL (no backend needed); also the _select fallback
+  _pure.py       # PurePath: the public pure level (lexical surface, no I/O)
   _path.py       # Path: thin, real-signature methods over the engine
   _async_path.py # AsyncPath + AsyncFile: the async surface over the bridge
   _async_fsspec.py # AsyncFSPath: a native async path over an fsspec
@@ -281,9 +288,6 @@ walk-fallback and `hardlink_to`-fallback tests) or it reads as uncovered.
 
 ## Deferred (not yet built)
 
-- A **dependency-free fallback driver** so a remote scheme works with no
-  backend installed (today `Path("s3://…")` needs `upath` or `cloudpathlib`).
-  The selection availability tail is an error branch it would append to.
 - A **sync-over-async portal** -- `Path` (synchronous) over an async driver,
   by driving an event loop. (`AsyncPath` over an async driver, including the
   fsspec cloud driver, is done; the reverse is not.)

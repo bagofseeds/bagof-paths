@@ -72,7 +72,12 @@ def build(
                 "universal-pathlib"
             )
         return _cloudpathlib_class(scheme)(text)  # its own errors are kept
-    raise NoDriverError(scheme, hint=_HINT)
+    # No backend can build this scheme. Rather than fail outright, fall back to
+    # a dependency-free lexical path: it parses and manipulates the URL, and
+    # raises a named error with a hint to install a backend on any I/O.
+    from ._pure_driver import PureCloudPath
+
+    return PureCloudPath.from_url(text, scheme, options)
 
 
 def _call_factory(

@@ -362,6 +362,23 @@ registry.
   `hash` follows. Ordering operators: not in v1 (pathlib orders only
   same-flavour paths; no consumer evidence). Windows case-insensitivity is
   explicitly not modeled (we compare canonical strings).
+- **Dependency-free lexical driver [settled].** With no backend installed, a
+  remote URL is backed by a stdlib-only lexical driver (`_pure_driver.py`) that
+  reproduces the `(protocol, path)` identity of a real backend so a path means
+  the same location whether or not `universal-pathlib`/`cloudpathlib` is
+  present. Two measured divergences were reconciled toward
+  `universal-pathlib`, the package default:
+  - *Bucket root.* `universal-pathlib` normalizes a bare bucket to a trailing
+    slash (`s3://bucket` has path `bucket/`, name `""`, and its parent is the
+    bucket root again), while `cloudpathlib` keeps `bucket` (name `bucket`).
+    The lexical driver converges on the `universal-pathlib` spelling; a
+    regression test pins it.
+  - *`.` and `//` in a key.* The lexical driver delegates to `PurePosixPath`,
+    which collapses a `.` segment and a doubled slash; `universal-pathlib`
+    preserves both. An ordinary key contains neither, so identity is exact for
+    real paths and differs only for these pathological spellings. Reproducing
+    the raw form lexically is not possible without re-implementing each
+    backend's `_strip_protocol`, so this is a documented residual divergence.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/

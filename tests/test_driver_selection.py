@@ -30,6 +30,11 @@ class _FakeDriver:
 
 # -- backend-independent ----------------------------------------------------
 def test_unknown_scheme_raises_no_driver() -> None:
+    # universal-pathlib rejects a scheme fsspec does not know, and that
+    # rejection becomes NoDriverError. With no backend installed at all the
+    # scheme instead degrades to a lexical path (see the fallback tests
+    # below), so this behaviour is specific to having universal-pathlib.
+    pytest.importorskip("upath")
     with pytest.raises(NoDriverError) as info:
         Path("bogus+unknown://x/y")
     assert info.value.scheme == "bogus+unknown"
@@ -102,16 +107,44 @@ def test_local_url_scheme() -> None:
     assert isinstance(p.wrapped, pathlib.Path)
 
 
-def test_selection_without_upath_falls_through(
+def test_selection_without_a_backend_falls_back_to_lexical(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import bagof.paths._select as sel
+    from bagof.paths._pure_driver import PureCloudPath
 
-    # With universal-pathlib unavailable and no cloudpathlib impl for the
-    # scheme, selection has no factory left and raises NoDriverError.
+    # With no backend able to build the scheme, selection returns a
+    # dependency-free lexical path rather than raising: the URL can be
+    # parsed and manipulated, and only I/O is unavailable.
     monkeypatch.setattr(sel, "_upath_class", lambda: None)
-    with pytest.raises(NoDriverError):
-        sel.build("weird-scheme://x", "weird-scheme")
+    monkeypatch.setattr(sel, "_cloudpathlib_impl", lambda scheme: None)
+    built = sel.build("weird-scheme://x/y", "weird-scheme")
+    assert isinstance(built, PureCloudPath)
+
+    # The same fallback backs a full Path, whose lexical surface works.
+    p = Path("weird-scheme://x/y")
+    assert isinstance(p.wrapped, PureCloudPath)
+    assert p.protocol == "weird-scheme"
+    assert p.name == "y"
+    assert str(p.parent) == "weird-scheme://x"
+
+
+def test_no_backend_path_raises_on_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import bagof.paths._select as sel
+    from bagof.paths import UnsupportedPathOperation
+
+    # No backend installed: a lexical path is built, but reading it names the
+    # remedy (install a backend) rather than silently doing nothing.
+    monkeypatch.setattr(sel, "_upath_class", lambda: None)
+    monkeypatch.setattr(sel, "_cloudpathlib_impl", lambda scheme: None)
+    p = Path("s3://bucket/key.txt")
+    assert p.path == "bucket/key.txt"
+    assert p.supports("read_bytes") is False
+    with pytest.raises(UnsupportedPathOperation) as info:
+        p.read_bytes()
+    assert "backend" in str(info.value)
 
 
 def test_double_colon_local_filename_stays_local() -> None:
