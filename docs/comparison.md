@@ -28,6 +28,7 @@ those libraries reach.
 | Make one from a URL | local only | yes | yes | **yes** |
 | Add support for another store | subclass | fsspec plugin | subclass + register | **one function call, or just wrap it** |
 | What it needs installed | nothing | `universal-pathlib` | `cloudpathlib` + a cloud library | **nothing for local; a library per store** |
+| Manipulate a path with nothing installed | local only | needs the package | needs the package | **yes, any scheme** |
 
 ## The same task, three ways
 
@@ -105,3 +106,7 @@ there, on `path.wrapped`.
   moving.
 * **Extensible.** Add a new URL scheme, or a new library's quirks, with a
   single function call.
+* **Parsing with nothing installed.** Every method that only describes a path
+  works on a URL with no backend present, and a read or write raises one clear
+  error until a library is installed. `PurePath` is the same parsing surface
+  with no I/O methods at all, for a value that must never touch storage.

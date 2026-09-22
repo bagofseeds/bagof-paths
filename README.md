@@ -36,7 +36,8 @@ Path('/data/sets/train.zarr/chunks')
 * **One error to catch.** An operation that cannot work raises a single
   `UnsupportedPathOperation`, the same for every library.
 * **Async support.** `AsyncPath` gives you the same methods with `await`.
-* **No required dependency.** Local paths use only the standard library.
+* **No required dependency.** Local paths use only the standard library, and a
+  URL can be parsed and rebuilt with no backend installed.
 
 ## Installation
 
@@ -110,6 +111,44 @@ asyncio.run(main())
 For a cloud store whose library speaks async (such as `s3://` through `s3fs`),
 `AsyncPath` talks to it directly, with no threads. For every other path it runs
 the synchronous driver in a worker thread, so the same code works either way.
+
+## Parsing without a backend
+
+Every method that only describes a path — `name`, `parent`, `suffix`,
+`with_name`, `/`, `match` — works on a URL even when no path library is
+installed. A `Path` falls back to plain parsing, and raises only when an
+actual read or write is attempted.
+
+```python
+from bagof.paths import Path
+
+# With no backend installed, the URL is still parsed.
+p = Path("s3://my-bucket/data/train.zarr")
+p.name                 # 'train.zarr'
+p.parent               # Path('s3://my-bucket/data')
+p / "chunks"           # Path('s3://my-bucket/data/train.zarr/chunks')
+
+p.read_bytes()         # raises UnsupportedPathOperation until a backend is installed
+```
+
+For a value that must never touch storage, use `PurePath`. It has the same
+parsing surface as `Path` and none of the I/O methods, so a read or write is
+not even offered.
+
+```pycon
+>>> from bagof.paths import Path, PurePath
+>>> pure = PurePath("/data/sets/train.zarr")
+>>> pure.name
+'train.zarr'
+>>> pure.with_suffix(".zip")
+PurePath('/data/sets/train.zip')
+>>> pure == Path("/data/sets/train.zarr")
+True
+```
+
+A `PurePath` and a `Path` to the same place compare equal and hash alike, so
+either one looks the other up in a set or a dictionary. This mirrors
+`pathlib`, where a `PurePath` equals the `Path` beside it.
 
 ## Learn more
 

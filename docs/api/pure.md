@@ -1,0 +1,1 @@
+# ::: bagof.paths.PurePath
