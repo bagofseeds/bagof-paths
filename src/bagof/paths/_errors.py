@@ -45,6 +45,25 @@ class UnsupportedPathOperation(_Base):
         super().__init__(message)
 
 
+class NoLocalPathError(UnsupportedPathOperation, TypeError):
+    """A path has no local file name.
+
+    Raised by `os.fspath` (and anything that calls it, such as `open`) on a
+    remote path: an `s3://` key is not a file on this machine. It is both an
+    `UnsupportedPathOperation` and a `TypeError`, so the usual probe for "is
+    this a local path?" still works:
+
+    ```python
+    try:
+        name = os.fspath(path)
+    except TypeError:
+        ...  # not a local file; use str(path), path.open(), or local_copy()
+    ```
+
+    `path.is_local()` answers the same question without raising.
+    """
+
+
 class NoDriverError(ValueError):
     """No installed driver can interpret a URL's scheme.
 

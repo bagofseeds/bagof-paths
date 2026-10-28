@@ -344,7 +344,9 @@ registry.
 - **`__fspath__` [settled, flagged].** Three-way disagreement with no
   consensus: pathlib returns the string, UPath refuses, cloudpathlib performs
   a network download. Decision: delegate for local drivers; for non-local
-  drivers raise `UnsupportedPathOperation` with a message naming the
+  drivers raise `NoLocalPathError` -- an `UnsupportedPathOperation` that
+  is also a `TypeError`, so the usual `try: os.fspath(x) except TypeError`
+  probe falls through (issue #23) -- with a message naming the
   alternatives (`str(p)` for the URL, `p.path` for the fsspec path,
   cloudpathlib's own `.fspath` for a cached local copy). Rationale: returning
   `"s3://…"` makes `open(os.fspath(p))` fail confusingly, and a silent
@@ -721,6 +723,7 @@ bagof.paths
     AsyncPath                 # the async wrapper
     UnsupportedPathOperation  # the state-3 exception
     NoDriverError             # construction: no driver builds this scheme
+    NoLocalPathError          # os.fspath on a remote path (also a TypeError)
     ProtocolTraits            # a scheme's traits (introspection)
     register_driver           # adapter registration (advanced, public)
     register_protocol         # protocol traits registration (advanced, public)
