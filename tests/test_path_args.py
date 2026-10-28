@@ -499,3 +499,26 @@ def test_native_async_io_takes_any_path_like(native_memory: str) -> None:
         with pytest.raises(TypeError):
             _run(coro(b"memargs://x/y"))
     assert _run(src.read_text()) == "x"
+
+
+def test_native_async_replace_takes_any_path_like(native_memory: str) -> None:
+    base = native_memory
+    src = AsyncPath(base + "/a.txt")
+    _run(src.write_text("x"))
+    replaced = _run(src.replace(Fspath(base + "/r.txt")))
+    assert replaced == AsyncPath(base + "/r.txt")
+    assert _run(replaced.read_text()) == "x"
+
+
+def test_joinpath_of_a_single_url_is_that_url() -> None:
+    assert str(PurePath("s3://b/x").joinpath("s3://c/d")) == "s3://c/d"
+
+
+@pytest.mark.parametrize(
+    "driver", [PureCloudPath.from_url("s3://b/x", "s3"), _pure_fs("s3://b/x")],
+    ids=["pure", "native-async"],
+)
+def test_our_drivers_restart_a_join_at_a_url(driver: tx.Any) -> None:
+    assert str(driver.joinpath("y", "s3://c/d", "e")) == "s3://c/d/e"
+    with pytest.raises(ValueError):
+        driver.joinpath("gs://c/d")
