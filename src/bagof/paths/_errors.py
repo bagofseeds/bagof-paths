@@ -70,3 +70,37 @@ class NoDriverError(ValueError):
         if hint:
             message += f": {hint}"
         super().__init__(message)
+
+
+class CommitError(OSError):
+    """A staged version could not be moved onto its target.
+
+    Raised by `commit` on the staging area that
+    [`Path.staged`][bagof.paths.Path.staged] returns. The target is left as
+    it was (or restored), and the staged data is kept, so the work is not
+    lost: the `staged` attribute is its location, `target` the path it was
+    meant for, and the original error is chained as `__cause__`. An
+    `errno` from that error is carried over. It is an `OSError`, so an
+    `except OSError` around a write still catches it.
+    """
+
+    def __init__(
+        self, target: tx.Any, staged: tx.Any, error: BaseException
+    ) -> None:
+        self.target = target
+        self.staged = staged
+        message = (
+            f"could not commit the staged version of {str(target)!r} "
+            f"({error}); the staged data is kept at {str(staged)!r}"
+        )
+        code = getattr(error, "errno", None)
+        if isinstance(code, int):
+            super().__init__(code, message)
+        else:
+            super().__init__(message)
+        self._error = error
+
+    def __reduce__(self) -> tx.Any:
+        # OSError pickles its args, which do not match this constructor; a
+        # worker process must still be able to send the error back.
+        return (type(self), (self.target, self.staged, self._error))

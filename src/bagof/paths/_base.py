@@ -34,6 +34,7 @@ from ._constants import (
     COMPUTED_MEMBERS,
     LOCAL_PROTOCOLS,
     SCHEME_RE,
+    STAGED_MEMBERS,
 )
 from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
@@ -193,6 +194,8 @@ class BaseWrapper:
             return self._supports_adapter_member(name)
         if name in COMPUTED_MEMBERS:
             return True
+        if name in STAGED_MEMBERS:
+            return hasattr(self, name)
         if name in ACCESSOR_MEMBERS:
             # Check the driver *class*, not the instance: these accessors are
             # properties, and some (universal-pathlib's `fs`/`info`) build the
@@ -222,7 +225,7 @@ class BaseWrapper:
         """The set of members that are wired for this path (see supports)."""
         names = (
             set(BY_NAME) | ADAPTER_MEMBERS | COMPUTED_MEMBERS
-            | ACCESSOR_MEMBERS
+            | ACCESSOR_MEMBERS | STAGED_MEMBERS
         )
         return frozenset(name for name in names if self.supports(name))
 
