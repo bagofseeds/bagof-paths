@@ -42,6 +42,7 @@ from ._detect import is_async_driver
 from ._errors import NoLocalPathError, UnsupportedPathOperation
 from ._protocols import (
     canonical_scheme,
+    chain_links,
     merged_storage_options,
     path_part,
     strip_url_query,
@@ -222,7 +223,7 @@ class BaseWrapper:
         if name == "walk":
             return hasattr(wrapped, "walk") or self.supports("iterdir")
         # copy / copy_into / move / move_into
-        return self.protocol in LOCAL_PROTOCOLS or hasattr(wrapped, "copy")
+        return self.is_local() or hasattr(wrapped, "copy")
 
     def capabilities(self) -> tx.FrozenSet[str]:
         """The set of members that are wired for this path (see supports)."""
@@ -360,13 +361,25 @@ class BaseWrapper:
 
     def _same_store(self, other: tx.Any) -> bool:
         """Whether the driver path `other` is in this path's store."""
-        def store(protocol: str) -> str:
-            if protocol in LOCAL_PROTOCOLS:
-                return ""
-            return canonical_scheme(protocol)
+        return self._store() == self.with_wrapped(other)._store()
 
-        theirs = self.with_wrapped(other).protocol
-        return store(self.protocol) == store(theirs)
+    def _store(self) -> str:
+        """The store this path is in: `""` for the local file system.
+
+        Otherwise the canonical scheme, or for an fsspec chain every link
+        (`simplecache::s3`): a chain names its last link's store through
+        the others, so it is never local, whatever the driver reports as
+        its protocol, and two chains are the same store only link by link.
+        """
+        wrapped = self._wrapped
+        if not isinstance(wrapped, pathlib.PurePath):
+            links = chain_links(str(wrapped))
+            if links:
+                return "::".join(canonical_scheme(link) for link in links)
+        protocol = self.protocol
+        if protocol in LOCAL_PROTOCOLS:
+            return ""
+        return canonical_scheme(protocol)
 
     def _query_free_arg(self, other: tx.Any) -> tx.Any:
         """A path argument without its URL query, as `_query_free` does.
@@ -465,9 +478,13 @@ class BaseWrapper:
 
         ```python
         Path("s3://bucket/scan.nii").is_local()     # False
+        Path("simplecache::s3://bucket/scan.nii").is_local()   # False
         ```
+
+        An fsspec chain is never local, even one that ends in a `file://`
+        URL: its links stand between the name and the file.
         """
-        return self.protocol in LOCAL_PROTOCOLS
+        return self._store() == ""
 
     # -- driver-specific accessors -----------------------------------------
     # Metadata and handles a particular driver exposes. Each delegates to the
@@ -547,15 +564,15 @@ class BaseWrapper:
         # equal regardless of which driver -- or which front-end -- backs
         # them. Built from the canonical properties, not raw str(wrapped), so
         # every adapter refinement to protocol/path repairs identity.
-        protocol = self.protocol
-        if protocol in LOCAL_PROTOCOLS:
+        store = self._store()
+        if store == "":
             # A local path also carries its flavour, as pathlib's identity
             # does: a POSIX path never equals a Windows one, and the hash
             # below is the flavour's own.
             return ("", self.path, _local_flavour(self._wrapped))
-        # Fold scheme aliases (s3/s3a, gs/gcs) to their canonical name, so
-        # two spellings of the same store compare and hash equal.
-        return (canonical_scheme(protocol), self.path)
+        # Scheme aliases (s3/s3a, gs/gcs) are folded to their canonical name,
+        # so two spellings of the same store compare and hash equal.
+        return (store, self.path)
 
     def _foreign_key(
         self, other: tx.Any

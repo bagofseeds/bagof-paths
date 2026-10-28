@@ -29,7 +29,6 @@ import shutil
 
 import typing_extensions as tx
 
-from ._constants import LOCAL_PROTOCOLS
 from ._errors import UnsupportedPathOperation
 
 
@@ -50,7 +49,7 @@ class GenericAdapter:
     """
 
     def _target_is_local(self, wrapper: tx.Any, target: tx.Any) -> bool:
-        return wrapper.with_wrapped(target).protocol in LOCAL_PROTOCOLS
+        return wrapper.with_wrapped(target).is_local()
 
     def rmdir(self, wrapper: tx.Any, *, recursive: bool) -> None:
         wrapped = wrapper._wrapped
@@ -63,7 +62,7 @@ class GenericAdapter:
             else:
                 wrapped.rmdir()
             return
-        if wrapper.protocol in LOCAL_PROTOCOLS:
+        if wrapper.is_local():
             shutil.rmtree(os.fspath(wrapped))
             return
         raise UnsupportedPathOperation(
@@ -82,7 +81,7 @@ class GenericAdapter:
     ) -> None:
         # os.fspath on a non-local target is a download-to-cache side channel;
         # never write through it. Cross-driver copy is out of scope here.
-        source_local = wrapper.protocol in LOCAL_PROTOCOLS
+        source_local = wrapper.is_local()
         if not source_local or not self._target_is_local(wrapper, target):
             raise UnsupportedPathOperation(
                 "copy",
