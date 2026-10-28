@@ -18,6 +18,16 @@ filesystem for the loop it is running on, building one (with
 `skip_instance_cache=True`) the first time and caching it weakly against that
 loop.
 
+Most backends strip the scheme off a URL to get their filesystem path
+(`s3://b/k` is `b/k`), but some keep the whole URL as the path -- fsspec's
+HTTP filesystem does, since a URL is the only name it has. For such a backend
+the lexical members split off the `scheme://authority` *anchor* and work on
+the remainder, so `https://h/dir/x` has the parts `("https://h/", "dir",
+"x")` and the parent `https://h/dir`, as universal-pathlib gives them. A
+trailing slash is kept there too, as an empty last part (`https://h/dir/` has
+the name `""` and the parent `https://h/dir`), since it names a different
+resource on an HTTP server.
+
 fsspec is an optional dependency, imported lazily: importing this module never
 imports fsspec, so the dependency-free core still imports on the 3.8 floor.
 """
@@ -29,6 +39,7 @@ import inspect
 import io
 import os
 import posixpath
+import re
 import stat as _statmod
 import weakref
 from pathlib import PurePosixPath
@@ -45,6 +56,13 @@ _FS_BY_LOOP: weakref.WeakKeyDictionary[tx.Any, tx.Dict[tx.Any, tx.Any]] = (
 # A per-loop cache holds its build lock under this sentinel key, apart from
 # the (scheme, options-token) keys that map to filesystems.
 _LOCK_KEY = object()
+
+# filesystem class -> whether its filesystem path keeps the URL scheme.
+_KEEPS_SCHEME: tx.Dict[tx.Any, bool] = {}
+
+# The `scheme://authority` a scheme-keeping filesystem path starts with; the
+# authority ends at the first "/", "?" or "#" (RFC 3986).
+_ANCHOR_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^/?#]*")
 
 
 def _freeze(value: tx.Any) -> tx.Any:
@@ -104,6 +122,27 @@ def _strip(scheme: str, url: str) -> str:
         return _filesystem_class(scheme)._strip_protocol(url)
     except Exception:  # pragma: no cover - exotic backend without class strip
         return url.split("://", 1)[1] if "://" in url else url
+
+
+def _keeps_scheme(scheme: str) -> bool:
+    """Whether the backend's filesystem path for `scheme` is the whole URL.
+
+    Most backends strip the scheme (`s3://b/k` becomes `b/k`); fsspec's HTTP
+    filesystem keeps it, since a URL is its only name. Probed once per
+    backend class from its own `_strip_protocol`, so any backend that keeps
+    the scheme is handled, not just HTTP. A scheme with no installed backend
+    does not keep it.
+    """
+    try:
+        cls = _filesystem_class(scheme)
+    except (ImportError, ValueError):
+        return False
+    known = _KEEPS_SCHEME.get(cls)
+    if known is None:
+        prefix = scheme + "://"
+        known = _strip(scheme, prefix + "host/key").startswith(prefix)
+        _KEEPS_SCHEME[cls] = known
+    return known
 
 
 def _url_options(scheme: str, url: str) -> tx.Dict[str, tx.Any]:
@@ -267,7 +306,7 @@ class _AsyncFSFile:
 class AsyncFSPath:
     """A path on an fsspec async filesystem, wrapped by `AsyncPath`."""
 
-    __slots__ = ("_scheme", "_path", "_options", "_pure")
+    __slots__ = ("_scheme", "_path", "_options", "_pure", "_anchor", "_slash")
 
     def __init__(
         self,
@@ -276,9 +315,29 @@ class AsyncFSPath:
         options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> None:
         self._scheme = scheme
-        self._path = path
         self._options = dict(options or {})
+        # The `scheme://authority` prefix of a backend whose filesystem path
+        # is the whole URL (HTTP), else "". The lexical members run on the
+        # remainder only, so `//` and the authority are never parsed as path
+        # segments.
+        self._anchor = ""
+        # Whether an anchored path ends in "/" (an empty last part).
+        self._slash = False
         self._pure = PurePosixPath(path)
+        match = _ANCHOR_RE.match(path) if _keeps_scheme(scheme) else None
+        if match is not None:
+            self._anchor = match.group(0)
+            rest = path[match.end():]
+            if not rest:
+                # A bare authority names its root, as universal-pathlib
+                # spells it (`https://h` has the path `https://h/`).
+                path = self._anchor + "/"
+                rest = "/"
+            self._pure = PurePosixPath(rest if rest[0] == "/" else "/" + rest)
+            # The root counts too: universal-pathlib gives `https://h/` an
+            # empty name after its anchor, and the root as its parent.
+            self._slash = rest.endswith("/")
+        self._path = path
 
     @classmethod
     def from_url(
@@ -313,6 +372,9 @@ class AsyncFSPath:
         return self._options
 
     def __str__(self) -> str:
+        if self._anchor:
+            # The filesystem path is already the whole URL.
+            return self._path
         # Match UPath's spelling: scheme://<path without a leading slash>.
         return "{}://{}".format(self._scheme, self._path.lstrip("/"))
 
@@ -320,6 +382,10 @@ class AsyncFSPath:
         return f"AsyncFSPath({str(self)!r})"
 
     def _derive(self, pure: PurePosixPath) -> AsyncFSPath:
+        if self._anchor:
+            sep = "" if pure.is_absolute() else "/"
+            path = self._anchor + sep + str(pure)
+            return AsyncFSPath(self._scheme, path, self._options)
         return AsyncFSPath(self._scheme, str(pure), self._options)
 
     def _child(self, stripped: str) -> AsyncFSPath:
@@ -327,33 +393,44 @@ class AsyncFSPath:
         return AsyncFSPath(self._scheme, stripped, self._options)
 
     # -- lexical members (synchronous, like PurePath) -----------------------
+    # A trailing slash on an anchored path is an empty last part, so the
+    # name and its pieces are empty and the parent drops only the slash.
     @property
     def name(self) -> str:
-        return self._pure.name
+        return "" if self._slash else self._pure.name
 
     @property
     def stem(self) -> str:
-        return self._pure.stem
+        return "" if self._slash else self._pure.stem
 
     @property
     def suffix(self) -> str:
-        return self._pure.suffix
+        return "" if self._slash else self._pure.suffix
 
     @property
     def suffixes(self) -> tx.List[str]:
-        return self._pure.suffixes
+        return [] if self._slash else self._pure.suffixes
 
     @property
     def parts(self) -> tx.Tuple[str, ...]:
+        if self._anchor:
+            # The anchor is the first part, as universal-pathlib gives it.
+            last = ("",) if self._slash else ()
+            return (self._anchor + "/",) + self._pure.parts[1:] + last
         return self._pure.parts
 
     @property
     def parent(self) -> AsyncFSPath:
+        if self._slash:
+            return self._derive(self._pure)
         return self._derive(self._pure.parent)
 
     @property
     def parents(self) -> tx.Tuple[AsyncFSPath, ...]:
-        return tuple(self._derive(p) for p in self._pure.parents)
+        parents = tuple(self._derive(p) for p in self._pure.parents)
+        if self._slash:
+            return (self._derive(self._pure),) + parents
+        return parents
 
     def joinpath(self, *segments: tx.Any) -> AsyncFSPath:
         return self._derive(self._pure.joinpath(*[str(s) for s in segments]))
@@ -362,22 +439,29 @@ class AsyncFSPath:
         return self.joinpath(other)
 
     def with_name(self, name: str) -> AsyncFSPath:
+        if self._slash:
+            # The empty last part is the one replaced.
+            return self._derive(self._pure / name)
         return self._derive(self._pure.with_name(name))
 
     def with_suffix(self, suffix: str) -> AsyncFSPath:
+        if self._slash:
+            raise ValueError(f"{str(self)!r} has an empty name")
         return self._derive(self._pure.with_suffix(suffix))
 
     def with_segments(self, *segments: tx.Any) -> AsyncFSPath:
-        # A single scheme-ful segment names an absolute path on this backend
+        # A scheme-ful first segment names an absolute path on this backend
         # (a rename/copy target given as a URL); rebuild it through the same
         # stripping the constructor uses, so its path matches this one's.
-        if len(segments) == 1 and "://" in str(segments[0]):
+        if segments and "://" in str(segments[0]):
             return AsyncFSPath.from_url(
-                str(segments[0]), self._scheme, self._options
+                "/".join(str(s) for s in segments), self._scheme, self._options
             )
         return self._derive(PurePosixPath(*[str(s) for s in segments]))
 
     def as_posix(self) -> str:
+        if self._anchor:
+            return self._path
         return self._pure.as_posix()
 
     def as_uri(self) -> str:
@@ -386,23 +470,41 @@ class AsyncFSPath:
     def is_absolute(self) -> bool:
         return self._pure.is_absolute()
 
-    def _other_pure(self, other: tx.Any) -> PurePosixPath:
+    def _other_locus(self, other: tx.Any) -> tx.Tuple[str, PurePosixPath]:
+        """`other` as an (anchor, lexical path) pair to compare against.
+
+        A bare, scheme-less text is read under this path's own anchor.
+        """
         if isinstance(other, AsyncFSPath):
-            return other._pure
+            return other._anchor, other._pure
         text = str(other)
         if "://" in text:
-            return PurePosixPath(_strip(self._scheme, text))
-        return PurePosixPath(text)
+            parsed = AsyncFSPath(self._scheme, _strip(self._scheme, text))
+            return parsed._anchor, parsed._pure
+        return self._anchor, PurePosixPath(text)
 
-    def relative_to(self, other: tx.Any, walk_up: bool = False) -> AsyncFSPath:
-        base = self._other_pure(other)
+    def relative_to(
+        self, other: tx.Any, walk_up: bool = False
+    ) -> tx.Union[AsyncFSPath, PurePosixPath]:
+        anchor, base = self._other_locus(other)
+        if anchor != self._anchor:
+            # A different authority (another host) is never a prefix.
+            raise ValueError(
+                f"{str(self)!r} is not relative to {str(other)!r}"
+            )
         if walk_up:
-            return self._derive(self._pure.relative_to(base, walk_up=True))
-        return self._derive(self._pure.relative_to(base))
+            relative = self._pure.relative_to(base, walk_up=True)
+        else:
+            relative = self._pure.relative_to(base)
+        if self._anchor:
+            # A bare relative path, as universal-pathlib returns: it has no
+            # authority to carry.
+            return relative
+        return self._derive(relative)
 
     def is_relative_to(self, other: tx.Any) -> bool:
         try:
-            self._pure.relative_to(self._other_pure(other))
+            self.relative_to(other)
             return True
         except ValueError:
             return False
@@ -595,7 +697,15 @@ class AsyncFSPath:
         # A remote path has no symlinks, but ``..`` is still collapsed (so the
         # result compares equal to the normalized spelling), and strict still
         # means the path must exist.
-        normalized = posixpath.normpath(self._path)
+        if self._anchor:
+            normalized = self._derive(
+                PurePosixPath(posixpath.normpath(str(self._pure)))
+            )._path
+            if self._slash and not normalized.endswith("/"):
+                # A directory URL stays one.
+                normalized += "/"
+        else:
+            normalized = posixpath.normpath(self._path)
         result = self if normalized == self._path else self._child(normalized)
         if strict:
             fs = await self._fs()
@@ -636,7 +746,7 @@ class AsyncFSPath:
             self._check_scheme(text.split("://", 1)[0])
             return _strip(self._scheme, text)
         # A bare name is resolved against this path's parent, like pathlib.
-        return str(self._pure.parent / text)
+        return self._derive(self._pure.parent / text)._path
 
     def _into(self, target_dir: tx.Any) -> AsyncFSPath:
         """This path's name placed inside `target_dir` (for *_into)."""
@@ -651,4 +761,4 @@ class AsyncFSPath:
         directory = PurePosixPath(text)
         if not directory.is_absolute():
             directory = self._pure.parent / directory
-        return self._child(str(directory / self._pure.name))
+        return self._derive(directory / self._pure.name)

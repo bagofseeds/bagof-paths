@@ -6,6 +6,7 @@ own in-memory filesystem, and drive ``AsyncPath`` against it end to end.
 """
 
 import asyncio
+import sys
 
 import pytest
 
@@ -735,3 +736,152 @@ def test_native_driver_reads_options_from_the_url() -> None:
         storage_options={"version_aware": False},
     )
     assert q.wrapped.storage_options == {"version_aware": False}
+
+
+# -- a backend whose filesystem path keeps the scheme (issue #32) -----------
+# fsspec's HTTP filesystem keeps the whole URL as its path (it is natively
+# async once aiohttp is installed). ``memurl`` stands in for it with no
+# network: its async ``_strip_protocol`` keeps the scheme, and the in-memory
+# store under it maps ``memurl://h/k`` to the key ``/h/k`` and back.
+class _URLMemory(MemoryFileSystem):
+    protocol = "memurl"
+
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        return MemoryFileSystem._strip_protocol(
+            path.replace("memurl://", "memory://")
+        )
+
+    def ls(self, path: str, detail: bool = True, **kwargs: object) -> object:
+        def url(name: str) -> str:
+            return "memurl://" + name.lstrip("/")
+
+        entries = super().ls(path, detail=detail, **kwargs)
+        if detail:
+            return [dict(e, name=url(e["name"])) for e in entries]
+        return [url(e) for e in entries]
+
+
+class _MemURLFS(AsyncFileSystemWrapper):
+    """A natively-async filesystem whose path is the whole URL, like HTTP."""
+
+    protocol = "memurl"
+    async_impl = True
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        for drop in ("asynchronous", "skip_instance_cache"):
+            kwargs.pop(drop, None)
+        super().__init__(_URLMemory(), asynchronous=True)
+
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        return path
+
+
+fsspec.register_implementation("memurl", _MemURLFS, clobber=True)
+
+
+def test_scheme_keeping_backend_is_detected() -> None:
+    from bagof.paths._async_fsspec import _keeps_scheme
+
+    assert _keeps_scheme("memurl") is True
+    assert _keeps_scheme("memasync") is False
+    assert _keeps_scheme("no-such-scheme") is False
+
+
+@pytest.mark.parametrize(
+    "url, parts, name, parent",
+    [
+        ("memurl://h/dir/x.nii.gz", ("memurl://h/", "dir", "x.nii.gz"),
+         "x.nii.gz", "memurl://h/dir"),
+        ("memurl://u:p@h:8/a/b.txt", ("memurl://u:p@h:8/", "a", "b.txt"),
+         "b.txt", "memurl://u:p@h:8/a"),
+        # A trailing slash is an empty last part; the parent drops only it.
+        ("memurl://h/a/b/", ("memurl://h/", "a", "b", ""), "",
+         "memurl://h/a/b"),
+        ("memurl://h/", ("memurl://h/", ""), "", "memurl://h/"),
+    ],
+)
+def test_scheme_keeping_backend_lexical_members(
+    url: str, parts: tuple, name: str, parent: str
+) -> None:
+    p = AsyncPath(url)
+    assert isinstance(p.wrapped, AsyncFSPath)
+    assert str(p) == url
+    assert p.path == url
+    assert p.parts == parts
+    assert p.name == name
+    assert str(p.parent) == parent
+
+
+def test_scheme_keeping_backend_derivation() -> None:
+    p = AsyncPath("memurl://h/dir/x.nii.gz")
+    assert str(p / "y") == "memurl://h/dir/x.nii.gz/y"
+    assert str(p.joinpath("a", "b.txt")) == "memurl://h/dir/x.nii.gz/a/b.txt"
+    assert str(p.with_name("y.txt")) == "memurl://h/dir/y.txt"
+    assert str(p.with_suffix(".json")) == "memurl://h/dir/x.nii.json"
+    assert p.suffixes == [".nii", ".gz"]
+    assert [str(a) for a in p.parents] == ["memurl://h/dir", "memurl://h/"]
+    assert p.as_posix() == "memurl://h/dir/x.nii.gz"
+    assert p.is_absolute()
+    # A bare authority names its root, so both spellings are one path.
+    assert AsyncPath("memurl://h").path == "memurl://h/"
+    assert AsyncPath("memurl://h") == AsyncPath("memurl://h/")
+    # A directory URL keeps its slash; a name replaces the empty last part.
+    d = AsyncPath("memurl://h/a/")
+    assert str(d.with_name("z")) == "memurl://h/a/z"
+    assert [str(a) for a in d.parents] == ["memurl://h/a", "memurl://h/"]
+    with pytest.raises(ValueError):
+        d.with_suffix(".x")
+
+
+def test_scheme_keeping_backend_query_and_relative_to() -> None:
+    p = AsyncPath("memurl://h/dir/x.nii.gz?token=1")
+    assert str(p) == "memurl://h/dir/x.nii.gz?token=1"
+    assert p.name == "x.nii.gz"
+    assert str(p.parent) == "memurl://h/dir"
+    assert str(p.relative_to("memurl://h/dir?other=2")) == "x.nii.gz"
+    assert str(p.relative_to(AsyncPath("memurl://h"))) == "dir/x.nii.gz"
+    assert p.is_relative_to("memurl://h/dir")
+    # Another authority is never a prefix, even with the same path.
+    assert not p.is_relative_to("memurl://other/dir")
+    with pytest.raises(ValueError):
+        p.relative_to("memurl://other/dir")
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="walk_up needs Python 3.12"
+)
+def test_scheme_keeping_backend_relative_to_walk_up() -> None:
+    p = AsyncPath("memurl://h/dir/x.txt")
+    assert str(p.relative_to("memurl://h/other", walk_up=True)) == (
+        "../dir/x.txt"
+    )
+    with pytest.raises(ValueError):
+        p.relative_to("memurl://other/dir", walk_up=True)
+
+
+def test_scheme_keeping_backend_io() -> None:
+    async def go() -> object:
+        p = AsyncPath("memurl://h/dir/a.txt")
+        await p.write_text("hi")
+        children = [str(c) async for c in p.parent.iterdir()]
+        moved = await p.rename("b.txt")
+        resolved = await AsyncPath("memurl://h/dir/../dir/b.txt").resolve()
+        folder = await AsyncPath("memurl://h/x/../dir/").resolve()
+        return (
+            MemoryFileSystem.store.keys(), children, str(moved),
+            await moved.read_text(), await p.exists(), str(resolved),
+            str(folder),
+        )
+
+    keys, children, moved, text, old_exists, resolved, folder = _run(go())
+    # The store is reached at the URL's own key, not a doubled scheme.
+    assert "/h/dir/b.txt" in keys
+    assert children == ["memurl://h/dir/a.txt"]
+    assert moved == "memurl://h/dir/b.txt"
+    assert text == "hi"
+    assert old_exists is False
+    assert resolved == "memurl://h/dir/b.txt"
+    # resolve() collapses ".." but a directory URL keeps its slash.
+    assert folder == "memurl://h/dir/"
