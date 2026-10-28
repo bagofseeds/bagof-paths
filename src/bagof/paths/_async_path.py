@@ -569,7 +569,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         self,
         *,
         copy: bool = False,
-        replace_type: bool = True,
+        replace_type: bool = False,
         keep_on_failure: bool = False,
     ) -> _staged.AsyncStage:
         """A staging area for a new version of this path.

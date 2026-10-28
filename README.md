@@ -143,10 +143,12 @@ with Path("s3://bucket/store.zarr").staged() as tmp:
 Path("out/table.csv").write_text(text, atomic=True)
 ```
 
-The new version can be a file or a whole directory. `staged(copy=True)` starts
-it as a copy of the current one, for updates in place (on a remote path, that
-is a full download). A file is replaced atomically on POSIX and on object
-stores; a directory is all-or-nothing, but briefly missing while it is swapped.
+The new version can be a file or a whole directory. Replacing a file with a
+directory, or the reverse, takes `staged(replace_type=True)`; without it the
+commit refuses, as `pathlib` does. `staged(copy=True)` starts it as a copy of
+the current one, for updates in place (on a remote path, that is a full
+download). A file is replaced atomically on POSIX and on object stores; a
+directory is all-or-nothing, but briefly missing while it is swapped.
 
 ## Async
 
