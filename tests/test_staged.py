@@ -1130,3 +1130,131 @@ def test_native_remote_atomic_write_refuses_a_directory(native: str) -> None:
         assert await target.read_text() == "old"
 
     _run(go())
+
+
+# -- an atomic write's errors name the target (issue #47) ---------------------
+# The caller of atomic= never sees the staging directory, so an error naming
+# one of its entries names the target instead; staged() names the path its
+# caller wrote.
+@pytest.mark.parametrize("front", ["sync", "async"])
+def test_a_failed_atomic_commit_names_the_target(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
+) -> None:
+    target = tmp_path / "y.bin"
+
+    def refuse(src: str, dst: str) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied", src, dst)
+
+    monkeypatch.setattr(staged_module.os, "replace", refuse)
+    with pytest.raises(PermissionError) as info:
+        if front == "sync":
+            Path(target).write_bytes(b"new", atomic=True)
+        else:
+            _run(AsyncPath(target).write_bytes(b"new", atomic=True))
+    error = info.value
+    assert error.errno == errno.EACCES
+    assert error.filename == str(target)
+    assert error.filename2 is None
+    assert ".staging-" not in str(error)
+    assert _listing(tmp_path) == []
+
+
+@pytest.mark.parametrize("mode", ["r+", "rb+"])
+def test_an_atomic_open_error_names_the_target(
+    tmp_path: pathlib.Path, mode: str
+) -> None:
+    target = tmp_path / "z.bin"
+    with pytest.raises(FileNotFoundError) as info:
+        Path(target).open(mode, atomic=True)
+    assert info.value.filename == str(target)
+    assert _listing(tmp_path) == []
+
+    async def go() -> None:
+        await AsyncPath(target).open(mode, atomic=True)
+
+    with pytest.raises(FileNotFoundError) as info:
+        _run(go())
+    assert info.value.filename == str(target)
+    assert _listing(tmp_path) == []
+
+
+@pytest.mark.parametrize("front", ["sync", "async"])
+def test_an_atomic_write_error_names_the_target(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
+) -> None:
+    target = tmp_path / "z.bin"
+    real_open = pathlib.Path.open
+
+    def full_disk(self: pathlib.Path, *args: tx.Any, **kw: tx.Any) -> tx.Any:
+        if ".staging-" in str(self):
+            raise OSError(errno.ENOSPC, "No space left on device", str(self))
+        return real_open(self, *args, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "open", full_disk)
+    with pytest.raises(OSError) as info:
+        if front == "sync":
+            Path(target).write_text("x", atomic=True)
+        else:
+            _run(AsyncPath(target).write_text("x", atomic=True))
+    assert info.value.errno == errno.ENOSPC
+    assert info.value.filename == str(target)
+    assert _listing(tmp_path) == []
+
+
+def test_an_error_without_a_staged_name_is_kept_as_it_is(
+    tmp_path: pathlib.Path,
+) -> None:
+    class Boom(Exception):
+        pass
+
+    error = Boom()
+    with pytest.raises(Boom) as info:
+        with staged_module.atomic(Path(tmp_path / "x")):
+            raise error
+    assert info.value is error
+    assert _listing(tmp_path) == []
+
+
+def test_staged_errors_name_the_staged_path(tmp_path: pathlib.Path) -> None:
+    # The caller wrote at the staged path, so that is the path named.
+    target = Path(tmp_path / "z.bin")
+    with pytest.raises(IsADirectoryError) as info:
+        with target.staged() as tmp:
+            tmp.mkdir()
+            tmp.write_bytes(b"x")
+    assert info.value.filename == str(tmp)
+    assert _listing(tmp_path) == []
+
+
+def test_a_staging_directory_that_cannot_be_made_names_the_target(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(prefix: str, dir: str) -> str:
+        raise PermissionError(
+            errno.EACCES, "Permission denied", os.path.join(dir, prefix)
+        )
+
+    monkeypatch.setattr(staged_module.tempfile, "mkdtemp", refuse)
+    target = tmp_path / "x.txt"
+    for make in (
+        lambda: Path(target).staged(),
+        lambda: Path(target).write_text("x", atomic=True),
+    ):
+        with pytest.raises(PermissionError) as info:
+            make()
+        assert info.value.filename == str(target)
+
+
+def test_a_remote_staging_directory_error_keeps_its_own_name(
+    memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A remote target is staged in the system temp directory, which is not
+    # beside the target: that error is about the temp directory, so it
+    # keeps the name it has.
+    def refuse(prefix: str, dir: tx.Any) -> str:
+        raise PermissionError(errno.EACCES, "Permission denied", "/tmp/x")
+
+    monkeypatch.setattr(staged_module.tempfile, "mkdtemp", refuse)
+    with pytest.raises(PermissionError) as info:
+        Path("memory://bucket/x.txt").staged()
+    assert info.value.filename == "/tmp/x"

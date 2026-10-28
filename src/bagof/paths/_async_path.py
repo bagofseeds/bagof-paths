@@ -489,9 +489,9 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
                     mode, buffering=buffering, encoding=encoding,
                     errors=errors, newline=newline,
                 )
-            except BaseException:
+            except BaseException as error:
                 await stage.discard()
-                raise
+                _staged.reraise_naming_target(error, stage)
             return _staged.AsyncAtomicFile(handle, stage)
         kwargs = {
             "buffering": buffering, "encoding": encoding,
@@ -535,7 +535,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`Path.write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            async with _staged.AsyncAtomicStage(self) as staged:
+            async with _staged.aatomic(self) as staged:
                 return await staged.write_bytes(data)
         return await self._call("write_bytes", (data,))
 
@@ -554,7 +554,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`Path.write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            async with _staged.AsyncAtomicStage(self) as staged:
+            async with _staged.aatomic(self) as staged:
                 return await staged.write_text(
                     data, encoding=encoding, errors=errors, newline=newline
                 )

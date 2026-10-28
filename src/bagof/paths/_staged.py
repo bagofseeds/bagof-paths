@@ -19,6 +19,7 @@ The design and the measurements behind it are recorded in
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import os
 import posixpath
@@ -74,6 +75,54 @@ def _type_error(new_is_dir: bool, target: tx.Any) -> OSError:
     else:
         code, cls = errno.EISDIR, IsADirectoryError
     return cls(code, os.strerror(code), str(target))
+
+
+def _inside(name: tx.Any, directory: str) -> bool:
+    return isinstance(name, str) and (
+        name == directory or name.startswith(directory + os.sep)
+    )
+
+
+def _naming_target(error: BaseException, stage: _StageBase) -> BaseException:
+    """`error` as writing the target itself would raise it.
+
+    An `OSError` that names an entry of the staging directory names the
+    target instead: the caller never saw the staging directory, and it is
+    gone by the time the error is read. Anything else is returned as it is.
+    """
+    directory = stage._dir
+    if (
+        directory is None
+        or not isinstance(error, OSError)
+        or error.errno is None
+        or not (
+            _inside(error.filename, directory)
+            or _inside(error.filename2, directory)
+        )
+    ):
+        return error
+    args: tx.Tuple[tx.Any, ...] = (
+        error.errno, error.strerror, str(stage._target)
+    )
+    winerror = getattr(error, "winerror", None)
+    if winerror is not None:  # pragma: no cover - Windows only
+        args += (winerror,)
+    try:
+        named = type(error)(*args)
+    except Exception:  # pragma: no cover - an OSError with another signature
+        return error
+    return named.with_traceback(error.__traceback__)
+
+
+def reraise_naming_target(
+    error: BaseException, stage: _StageBase
+) -> tx.NoReturn:
+    """Re-raise `error` (inside the `except` that caught it), naming the
+    target rather than the staging directory."""
+    named = _naming_target(error, stage)
+    if named is error:
+        raise error
+    raise named from None
 
 
 # -- local: copy in, commit out -----------------------------------------------
@@ -343,7 +392,8 @@ class _StageBase:
 
     # The stage behind `atomic=True`: it writes a file, so it refuses a
     # directory at the target; a failure leaves nothing behind and raises the
-    # error itself, since the caller has no stage to commit again.
+    # error itself, naming the target, since the caller has no stage to
+    # commit again and never saw the staging directory.
     _atomic: tx.ClassVar[bool] = False
 
     def __init__(
@@ -387,7 +437,16 @@ class _StageBase:
                 f"cannot stage {str(self._target)!r}: it names no file or "
                 "directory"
             )
-        self._dir = _make_staging_dir(parent, name)
+        try:
+            self._dir = _make_staging_dir(parent, name)
+        except OSError as error:
+            if not self._local or error.errno is None:
+                raise
+            # The directory beside the target could not be made (no write
+            # permission, say): name the target, as writing it would.
+            raise type(error)(
+                error.errno, error.strerror, str(self._target)
+            ) from None
         self._finalizer = weakref.finalize(self, _remove, self._dir)
         self._entry = os.path.join(self._dir, name)
         self._path = self._target.with_wrapped(LocalPath(self._entry))
@@ -486,7 +545,7 @@ class Stage(_StageBase):
                 raise self._failed(error) from error
             self.discard()
             if self._atomic:
-                raise
+                reraise_naming_target(error, self)
             raise CommitError(self._target, None, error) from error
         self._state = _COMMITTED
         self._cleanup()
@@ -602,7 +661,7 @@ class AsyncStage(_StageBase):
                 raise self._failed(error) from error
             await self.discard()
             if self._atomic:
-                raise
+                reraise_naming_target(error, self)
             raise CommitError(self._target, None, error) from error
         self._state = _COMMITTED
         await bridge.run(self._cleanup)
@@ -630,10 +689,11 @@ class AsyncStage(_StageBase):
 # -- atomic writes ----------------------------------------------------------
 # `atomic=True` on `write_bytes`, `write_text` and `open` is the plain write,
 # made atomic: where the staging area would show, it acts as the plain write
-# does. It refuses a directory at the target, and a failure, before or during
-# the commit, leaves nothing behind and raises the error itself, not
-# `CommitError`. It never keeps its data: the caller still holds it, and it
-# never changes the type of the target, even with `replace_type=True`.
+# does. It refuses a directory at the target, an error names the target
+# (never the staging directory), and a failure, before or during the commit,
+# leaves nothing behind and raises the error itself, not `CommitError`. It
+# never keeps its data: the caller still holds it, and it never changes the
+# type of the target, even with `replace_type=True`.
 class AtomicStage(Stage):
     """The staging area behind `atomic=True`."""
 
@@ -644,6 +704,30 @@ class AsyncAtomicStage(AsyncStage):
     """The async staging area behind `atomic=True`."""
 
     _atomic = True
+
+
+@contextlib.contextmanager
+def atomic(target: tx.Any) -> tx.Iterator[tx.Any]:
+    """Write a new file at the yielded path; commit it over `target`."""
+    stage = AtomicStage(target)
+    try:
+        yield stage.path
+    except BaseException as error:
+        stage.discard()
+        reraise_naming_target(error, stage)
+    stage.commit()
+
+
+@contextlib.asynccontextmanager
+async def aatomic(target: tx.Any) -> tx.AsyncIterator[tx.Any]:
+    """The async counterpart of `atomic`."""
+    stage = await AsyncAtomicStage(target)
+    try:
+        yield stage.path
+    except BaseException as error:
+        await stage.discard()
+        reraise_naming_target(error, stage)
+    await stage.commit()
 
 
 def check_atomic_mode(mode: str) -> bool:
