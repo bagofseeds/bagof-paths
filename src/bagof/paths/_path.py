@@ -231,7 +231,7 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         self,
         *,
         copy: bool = False,
-        replace_type: bool = True,
+        replace_type: bool = False,
         keep_on_failure: bool = False,
     ) -> _staged.Stage:
         """A staging area for a new version of this path.
@@ -274,21 +274,23 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         Outside a `with` block, call `commit()` or `discard()` on the
         returned [`Stage`][bagof.paths.Stage]; its `path` is the staged path.
 
-        `replace_type=False` refuses to replace a directory with a file, or a
-        file with a directory, as `pathlib` does: committing raises
+        A file never replaces a directory, nor a directory a file, unless
+        you pass `replace_type=True`: as with `pathlib`, committing raises
         [`CommitError`][bagof.paths.CommitError] with the `errno` of
-        `IsADirectoryError` or `NotADirectoryError`. By default a change of
-        type is a new version like any other.
+        `IsADirectoryError` or `NotADirectoryError`, and this path is left
+        as it was. Pass it when the change is the new version you mean, such
+        as a zarr store moving from a zip file to a directory.
 
         What committing guarantees:
 
         - **A file** replaces a local file in one atomic step on POSIX
           (readers that have the old file open, even memory-mapped, keep
           reading it), and a remote object in one upload.
-        - **A directory**, or a change between file and directory, is
-          all-or-nothing but not atomic: the old version is moved aside and
-          the new one moved in, so it is briefly missing. On a remote path it
-          is uploaded file by file, and readers can see a mixture meanwhile.
+        - **A directory**, or a change between file and directory (with
+          `replace_type=True`), is all-or-nothing but not atomic: the old
+          version is moved aside and the new one moved in, so it is briefly
+          missing. On a remote path it is uploaded file by file, and readers
+          can see a mixture meanwhile.
         - An error inside the `with` block leaves this path as it was and
           removes the staged data.
         - If committing fails, this path is left as it was (or restored), the

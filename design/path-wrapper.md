@@ -571,10 +571,14 @@ registry.
   ourselves is the default, keeping costly work is the opt-in). A dropped
   stage is cleaned by a finalizer. `copy=True` starts the staged entry as a
   copy (a download, for a remote target) for read-modify-write jobs.
-  `replace_type=False` refuses a change between file and directory
-  (`CommitError` with `EISDIR` or `ENOTDIR`); the check sits in the commit,
-  just before the old entry is touched, since a directory can appear after
-  any earlier check.
+  A change between file and directory is refused by default, as `pathlib`
+  and `os.replace` refuse it (`CommitError` with `EISDIR` or `ENOTDIR`, the
+  target untouched); `replace_type=True` allows it, for a format that
+  changes shape (a zarr store from a zip file to a directory). Refusing is
+  the default because replacing a directory with a file deletes the tree,
+  which must never happen silently (#45). The check sits in the commit, just
+  before the old entry is touched, since a directory can appear after any
+  earlier check.
 
   `atomic=` on `write_bytes`, `write_text` and `open` is built on it (`open`
   needs a writing mode; `a`/`r+` start from a copy), and is **the plain
@@ -586,12 +590,10 @@ registry.
   the caller still holds its data and has no stage to commit again, so it
   never keeps it. An `OSError` that names an entry of the staging directory
   is re-raised naming the target (#47): the caller never saw that
-  directory, and it is gone when the error is read. `staged()` keeps a
-  change of type as a new version unless `replace_type=False`, and an error
-  raised while its caller writes at the staged path names that path, which
-  is the one it wrote. Making the staging directory is the exception: the
-  caller has not seen it yet, so a failure there names the target on every
-  stage.
+  directory, and it is gone when the error is read. An error raised while a
+  `staged()` caller writes at the staged path names that path, which is the
+  one it wrote. Making the staging directory is the exception: the caller
+  has not seen it yet, so a failure there names the target on every stage.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has

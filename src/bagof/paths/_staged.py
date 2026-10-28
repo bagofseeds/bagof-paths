@@ -493,7 +493,7 @@ class Stage(_StageBase):
         target: tx.Any,
         *,
         copy: bool = False,
-        replace_type: bool = True,
+        replace_type: bool = False,
         keep_on_failure: bool = False,
     ) -> None:
         super().__init__(target, copy, replace_type, keep_on_failure)
@@ -584,7 +584,7 @@ class AsyncStage(_StageBase):
         target: tx.Any,
         *,
         copy: bool = False,
-        replace_type: bool = True,
+        replace_type: bool = False,
         keep_on_failure: bool = False,
     ) -> None:
         super().__init__(target, copy, replace_type, keep_on_failure)
@@ -692,8 +692,8 @@ class AsyncStage(_StageBase):
 # does. It refuses a directory at the target, an error names the target
 # (never the staging directory), and a failure, before or during the commit,
 # leaves nothing behind and raises the error itself, not `CommitError`. It
-# never keeps its data: the caller still holds it. A `staged()` caller keeps
-# a change of type unless `replace_type=False`.
+# never keeps its data: the caller still holds it, and it never changes the
+# type of the target, even with `replace_type=True`.
 class AtomicStage(Stage):
     """The staging area behind `atomic=True`."""
 
