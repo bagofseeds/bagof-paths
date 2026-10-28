@@ -483,7 +483,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
             copy = _staged.check_atomic_mode(mode)
             if "x" in mode and await self.exists():
                 raise _staged.exists_error(self)
-            stage = await self.staged(copy=copy)
+            stage = await _staged.AsyncAtomicStage(self, copy=copy)
             try:
                 handle = await stage.path.open(
                     mode, buffering=buffering, encoding=encoding,
@@ -535,7 +535,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`Path.write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            async with self.staged() as staged:
+            async with _staged.AsyncAtomicStage(self) as staged:
                 return await staged.write_bytes(data)
         return await self._call("write_bytes", (data,))
 
@@ -554,7 +554,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`Path.write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            async with self.staged() as staged:
+            async with _staged.AsyncAtomicStage(self) as staged:
                 return await staged.write_text(
                     data, encoding=encoding, errors=errors, newline=newline
                 )
@@ -565,7 +565,9 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- staged writes -----------------------------------------------------
     @_awaitable
-    def staged(self, *, copy: bool = False) -> _staged.AsyncStage:
+    def staged(
+        self, *, copy: bool = False, keep_on_failure: bool = False
+    ) -> _staged.AsyncStage:
         """A staging area for a new version of this path.
 
         The same as [`Path.staged`][bagof.paths.Path.staged], used with
@@ -579,7 +581,9 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         Outside an `async with` block, `await` it to make the staging
         area, then `await` its `commit()` or `discard()`.
         """
-        return _staged.AsyncStage(self, copy=copy)
+        return _staged.AsyncStage(
+            self, copy=copy, keep_on_failure=keep_on_failure
+        )
 
     # -- directory iteration -----------------------------------------------
     async def iterdir(self) -> tx.AsyncIterator[tx.Self]:
