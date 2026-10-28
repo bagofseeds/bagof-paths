@@ -22,7 +22,9 @@ import typing_extensions as tx
 import bagof.paths as paths
 
 #: Modules whose public docstrings carry runnable examples.
-SOURCES = ["_path.py", "_async_path.py", "_pure.py", "_purepath.py"]
+SOURCES = [
+    "_base.py", "_path.py", "_async_path.py", "_pure.py", "_purepath.py",
+]
 
 #: Hand-written pages, relative to the repository root.
 PAGES = ["README.md", "docs/comparison.md"]

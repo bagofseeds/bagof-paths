@@ -67,6 +67,7 @@ tests/
   test_parity_gap.py          # the pathlib/UPath/cloud surface parity
   test_driver_selection.py    # URL construction + register_protocol
   test_url_query.py           # what part of a URL is not the path
+  test_is_local.py            # is_local() agrees with __fspath__
   test_parity.py              # sync/async surfaces stay in lockstep
   test_docstrings.py          # every pycon block in a docstring or page
   test_licensing.py
@@ -107,6 +108,10 @@ name would collide.
   differing only after a `?` are never merged. Local paths keep `?`/`#`;
   `file:` URIs follow Python 3.14's `from_uri` on every version
   (`_local_from_file_uri`), never the running pathlib.
+- **`is_local()` and `__fspath__` share one test** (`BaseWrapper.is_local`,
+  the protocol is in `LOCAL_PROTOCOLS`), so a path is local exactly when
+  `os.fspath` gives its file name. It is lexical and synchronous on every
+  front-end; the local set is fixed, not a protocol trait.
 - **`_drivers.py` absorbs the operations backends genuinely disagree on** —
   `rmdir` recursion, native `copy`/`move`, `walk` — behind adapters selected
   by driver type. A `GenericAdapter` duck-types any driver; named subclasses
