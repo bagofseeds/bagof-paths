@@ -1258,3 +1258,236 @@ def test_a_remote_staging_directory_error_keeps_its_own_name(
     with pytest.raises(PermissionError) as info:
         Path("memory://bucket/x.txt").staged()
     assert info.value.filename == "/tmp/x"
+
+
+# -- a failed commit never loses the old version (issue #57) ------------------
+# Once a commit has started changing the target, a failure removes nothing:
+# the old version, or the staged one, may be the only copy left.
+def _a_directory_swap(
+    tmp_path: pathlib.Path, **options: tx.Any
+) -> tx.Tuple[Path, Stage]:
+    target = Path(tmp_path / "data.zarr")
+    target.mkdir()
+    (target / "keep.bin").write_bytes(b"old")
+    stage = target.staged(**options)
+    stage.path.mkdir()
+    (stage.path / "new.bin").write_bytes(b"new")
+    return target, stage
+
+
+def _renames_fail_after(
+    monkeypatch: pytest.MonkeyPatch, allowed: int
+) -> None:
+    real_rename = os.rename
+    calls = []
+
+    def rename(src: str, dst: str) -> None:
+        calls.append(src)
+        if len(calls) > allowed:
+            raise OSError(errno.EIO, "boom")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(staged_module.os, "rename", rename)
+
+
+@pytest.mark.parametrize("keep", [False, True])
+def test_an_old_directory_that_cannot_be_put_back_is_kept(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, keep: bool
+) -> None:
+    target, stage = _a_directory_swap(tmp_path, keep_on_failure=keep)
+    # The old one moves aside; moving the new one in fails, and so does
+    # moving the old one back.
+    _renames_fail_after(monkeypatch, 1)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    monkeypatch.undo()
+    error = info.value
+    assert error.errno == errno.EIO
+    previous = pathlib.Path(error.previous)
+    assert (previous / "keep.bin").read_bytes() == b"old"
+    assert previous.name == "data.zarr"
+    assert previous.parent.parent == tmp_path  # beside the target
+    assert str(previous) in str(error)
+    assert (pathlib.Path(error.staged) / "new.bin").read_bytes() == b"new"
+    assert not target.exists()
+
+    # Neither discarding the stage nor committing it again removes it.
+    stage.commit()
+    assert (target / "new.bin").read_bytes() == b"new"
+    assert (previous / "keep.bin").read_bytes() == b"old"
+
+
+def test_discarding_after_a_failed_swap_keeps_the_old_directory(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, stage = _a_directory_swap(tmp_path)
+    _renames_fail_after(monkeypatch, 1)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    monkeypatch.undo()
+    stage.discard()
+    assert (pathlib.Path(info.value.previous) / "keep.bin").exists()
+
+
+def test_a_change_of_type_that_cannot_be_put_back_is_kept(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = Path(tmp_path / "data.zarr")
+    target.mkdir()
+    (target / "keep.bin").write_bytes(b"old")
+    stage = target.staged(replace_type=True)
+    stage.path.write_bytes(b"a file")
+    _renames_fail_after(monkeypatch, 1)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    monkeypatch.undo()
+    assert (pathlib.Path(info.value.previous) / "keep.bin").exists()
+    assert pathlib.Path(info.value.staged).read_bytes() == b"a file"
+
+
+@pytest.mark.parametrize("allowed", [0, 1])
+def test_a_failed_swap_that_is_undone_leaves_nothing_behind(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, allowed: int
+) -> None:
+    # 0: the old one cannot be moved aside; 1: the new one cannot be moved
+    # in, and the old one is moved back. Either way the target is as it was.
+    target, stage = _a_directory_swap(tmp_path)
+    real_rename = os.rename
+    calls = []
+
+    def rename(src: str, dst: str) -> None:
+        calls.append(src)
+        if len(calls) == allowed + 1:
+            raise OSError(errno.EIO, "boom")
+        real_rename(src, dst)
+
+    monkeypatch.setattr(staged_module.os, "rename", rename)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    assert info.value.staged is None and info.value.previous is None
+    assert _listing(tmp_path / "data.zarr") == ["keep.bin"]
+    assert _listing(tmp_path) == ["data.zarr"]
+
+
+def test_async_old_directory_that_cannot_be_put_back_is_kept(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "data.zarr"
+    target.mkdir()
+    (target / "keep.bin").write_bytes(b"old")
+
+    async def go() -> None:
+        stage = await AsyncPath(target).staged()
+        await stage.path.mkdir()
+        await (stage.path / "new.bin").write_bytes(b"new")
+        _renames_fail_after(monkeypatch, 1)
+        with pytest.raises(CommitError) as info:
+            await stage.commit()
+        monkeypatch.undo()
+        await stage.discard()
+        previous = pathlib.Path(info.value.previous)
+        assert (previous / "keep.bin").read_bytes() == b"old"
+
+    _run(go())
+
+
+def test_a_remote_commit_that_changed_the_target_keeps_the_data(
+    memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A file replacing a directory: the directory is gone before the upload.
+    tree = Path("memory://bucket/tree")
+    (tree / "keep").write_text("old")
+    stage = tree.staged(replace_type=True)
+    stage.path.write_text("new file")
+
+    def refuse(local: str, remote: tx.Any) -> None:
+        raise OSError(errno.EIO, "upload failed")
+
+    monkeypatch.setattr(staged_module, "_upload_file", refuse)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    assert info.value.previous is None
+    assert pathlib.Path(info.value.staged).read_text() == "new file"
+    monkeypatch.undo()
+    stage.commit()  # the kept data can still be committed
+    assert tree.read_text() == "new file"
+
+    # A directory uploaded in part: the target is now a mixture.
+    store = Path("memory://bucket/store")
+    (store / "a").write_text("old a")
+    (store / "b").write_text("old b")
+    stage = store.staged()
+    stage.path.mkdir()
+    (stage.path / "a").write_text("new a")
+    (stage.path / "b").write_text("new b")
+    real_upload = staged_module._upload_file
+    calls = []
+
+    def flaky(local: str, remote: tx.Any) -> None:
+        calls.append(local)
+        if len(calls) == 2:
+            raise OSError(errno.EIO, "upload failed")
+        real_upload(local, remote)
+
+    monkeypatch.setattr(staged_module, "_upload_file", flaky)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    staged = pathlib.Path(info.value.staged)
+    assert sorted(p.name for p in staged.iterdir()) == ["a", "b"]
+
+
+def test_a_remote_file_upload_that_fails_changes_nothing(
+    memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One object, written whole: the old one is untouched, so nothing kept.
+    target = Path("memory://bucket/x.txt")
+    target.write_text("old")
+    stage = target.staged()
+    stage.path.write_text("new")
+
+    def refuse(local: str, remote: tx.Any) -> None:
+        raise OSError(errno.EIO, "upload failed")
+
+    monkeypatch.setattr(staged_module, "_upload_file", refuse)
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    assert info.value.staged is None
+    assert target.read_text() == "old"
+
+
+def test_native_remote_commit_that_changed_the_target_keeps_the_data(
+    native: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def go() -> None:
+        tree = AsyncPath(f"{native}://bucket/tree")
+        await (tree / "keep").write_text("old")
+        stage = await tree.staged(replace_type=True)
+        await stage.path.write_text("new file")
+        real_write = type(tree).write_bytes
+
+        async def refuse(self: tx.Any, data: tx.Any, **kw: tx.Any) -> int:
+            if str(self) == str(tree):
+                raise OSError(errno.EIO, "upload failed")
+            return await real_write(self, data, **kw)
+
+        monkeypatch.setattr(type(tree), "write_bytes", refuse)
+        with pytest.raises(CommitError) as info:
+            await stage.commit()
+        monkeypatch.undo()
+        assert pathlib.Path(info.value.staged).read_text() == "new file"
+        await stage.discard()
+
+    _run(go())
+
+
+def test_commit_error_with_a_previous_version_survives_pickling(
+    tmp_path: pathlib.Path,
+) -> None:
+    import pickle
+
+    error = CommitError(
+        Path(tmp_path / "x"), str(tmp_path / ".x.staging-a/x"),
+        OSError(errno.EIO, "boom"), previous=str(tmp_path / ".x.old-b/x"),
+    )
+    copy = pickle.loads(pickle.dumps(error))
+    assert copy.previous == error.previous and str(copy) == str(error)

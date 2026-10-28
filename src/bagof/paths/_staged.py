@@ -45,20 +45,34 @@ _CHUNK = 1 << 20
 
 
 # -- the staging directory ---------------------------------------------------
-def _make_staging_dir(parent: tx.Optional[str], name: str) -> str:
-    """A new, private staging directory: hidden, named after the target."""
+def _make_staging_dir(
+    parent: tx.Optional[str], name: str, kind: str = "staging"
+) -> str:
+    """A new, private directory: hidden, named after the target.
+
+    `kind` says what it holds: the staged version, or (`"old"`) the old one
+    while a directory is swapped.
+    """
     try:
-        return tempfile.mkdtemp(prefix=f".{name}.staging-", dir=parent)
+        return tempfile.mkdtemp(prefix=f".{name}.{kind}-", dir=parent)
     except OSError as error:
         if error.errno != errno.ENAMETOOLONG:
             raise
-        # The target's name leaves no room for the prefix; the staged entry
-        # inside still carries the full name.
-        return tempfile.mkdtemp(prefix=".staging-", dir=parent)
+        # The target's name leaves no room for the prefix; the entry inside
+        # still carries the full name.
+        return tempfile.mkdtemp(prefix=f".{kind}-", dir=parent)
 
 
 def _remove(path: str) -> None:
     shutil.rmtree(path, ignore_errors=True)
+
+
+def _remove_empty(path: str) -> None:
+    """Remove a directory only if it is empty: it may hold the user's data."""
+    try:
+        os.rmdir(path)
+    except OSError:  # pragma: no cover - not empty, or already gone
+        pass
 
 
 def _resolve_local(target: tx.Any) -> tx.Tuple[str, str, str]:
@@ -125,6 +139,31 @@ def reraise_naming_target(
     raise named from None
 
 
+class _TargetChanged(Exception):
+    """A commit failed after it had started changing the target.
+
+    The target is no longer as it was, so nothing may be removed: the staged
+    data may now be the only complete version, and `previous` is where the
+    old version was left when it could not be put back.
+    """
+
+    def __init__(
+        self, error: BaseException, previous: tx.Optional[str] = None
+    ) -> None:
+        super().__init__(error)
+        self.error = error
+        self.previous = previous
+
+
+@contextlib.contextmanager
+def _changing_target() -> tx.Iterator[None]:
+    """Mark a failure inside the block as one that changed the target."""
+    try:
+        yield
+    except Exception as error:
+        raise _TargetChanged(error) from error
+
+
 # -- local: copy in, commit out -----------------------------------------------
 def _is_dir(path: str) -> bool:
     return os.path.isdir(path) and not os.path.islink(path)
@@ -167,7 +206,7 @@ def _fsync_dir(path: str) -> None:
 
 
 def _commit_local(
-    entry: str, real: str, staging: str, target: tx.Any, replace_type: bool
+    entry: str, real: str, target: tx.Any, replace_type: bool
 ) -> None:
     """Move what exists at `entry` onto the local target `real`."""
     if not os.path.lexists(entry):
@@ -186,18 +225,35 @@ def _commit_local(
         os.replace(entry, real)
         _fsync_dir(os.path.dirname(real))
         return
-    # A directory, or a change of type: move the old entry aside (into the
-    # staging directory, so on the same file system), then the new one in.
-    aside = os.path.join(tempfile.mkdtemp(dir=staging), "old")
-    if old_exists:
+    # A directory, or a change of type: move the old entry aside, then the
+    # new one in. Aside is a hidden directory of its own beside the target
+    # (so on the same file system), never the staging directory: if the old
+    # entry cannot be put back, discarding the stage must not reach it.
+    parent, name = os.path.split(real)
+    if not old_exists:
+        os.rename(entry, real)
+        _fsync_dir(parent)
+        return
+    holder = _make_staging_dir(parent, name, "old")
+    aside = os.path.join(holder, name)
+    try:
         os.rename(real, aside)
+    except BaseException:
+        _remove_empty(holder)
+        raise
     try:
         os.rename(entry, real)
-    except BaseException:
-        if old_exists:
+    except BaseException as error:
+        try:
             os.rename(aside, real)
+        except BaseException:
+            # The old version is neither at the target nor back: leave it
+            # where it is, for good, and say where.
+            raise _TargetChanged(error, previous=aside) from error
+        _remove_empty(holder)
         raise
-    _fsync_dir(os.path.dirname(real))
+    _fsync_dir(parent)
+    _remove(holder)  # the old version, now replaced
 
 
 # -- remote: download in, upload out ------------------------------------------
@@ -296,20 +352,27 @@ def _commit_remote(entry: str, target: tx.Any, replace_type: bool) -> None:
     if not replace_type and old == ("file" if new_is_dir else "dir"):
         raise _type_error(new_is_dir, target)
     if not new_is_dir:
-        if old == "dir":
+        if old != "dir":
+            # One object, written whole: a failure leaves the old one.
+            _upload_file(entry, target)
+            return
+        with _changing_target():
             target.rmdir(recursive=True)
-        _upload_file(entry, target)
+            _upload_file(entry, target)
         return
-    if old == "file":
-        target.unlink()
     base = target._query_free()
     new = _local_files(entry)
-    for relative in new:
-        _upload_file(os.path.join(entry, *relative.split("/")),
-                     _join(base, relative))
-    if old == "dir":
-        for stale in sorted(_remote_files(base) - set(new)):
-            _join(base, stale).unlink()
+    # A directory is uploaded file by file: from the first change on, the
+    # target is neither the old version nor the new one.
+    with _changing_target():
+        if old == "file":
+            target.unlink()
+        for relative in new:
+            _upload_file(os.path.join(entry, *relative.split("/")),
+                         _join(base, relative))
+        if old == "dir":
+            for stale in sorted(_remote_files(base) - set(new)):
+                _join(base, stale).unlink()
 
 
 # -- remote, natively async ---------------------------------------------------
@@ -366,24 +429,30 @@ async def _acommit_remote(
     new_is_dir = await bridge.run(_is_dir, entry)
     if not replace_type and old == ("file" if new_is_dir else "dir"):
         raise _type_error(new_is_dir, target)
-    if not new_is_dir:
-        if old == "dir":
-            await target.rmdir(recursive=True)
+    data = None if new_is_dir else await bridge.run(_read_local, entry)
+    if not new_is_dir and old != "dir":
         # One request: the native driver writes the object whole.
-        await target.write_bytes(await bridge.run(_read_local, entry))
+        await target.write_bytes(data)
         return
-    if old == "file":
-        await target.unlink()
-    base = target._query_free()
-    new = await bridge.run(_local_files, entry)
-    for relative in new:
-        local = os.path.join(entry, *relative.split("/"))
-        await _join(base, relative).write_bytes(
-            await bridge.run(_read_local, local)
-        )
-    if old == "dir":
-        for stale in sorted(await _aremote_files(base) - set(new)):
-            await _join(base, stale).unlink()
+    try:
+        if not new_is_dir:
+            await target.rmdir(recursive=True)
+            await target.write_bytes(data)
+            return
+        if old == "file":
+            await target.unlink()
+        base = target._query_free()
+        new = await bridge.run(_local_files, entry)
+        for relative in new:
+            local = os.path.join(entry, *relative.split("/"))
+            await _join(base, relative).write_bytes(
+                await bridge.run(_read_local, local)
+            )
+        if old == "dir":
+            for stale in sorted(await _aremote_files(base) - set(new)):
+                await _join(base, stale).unlink()
+    except Exception as error:
+        raise _TargetChanged(error) from error
 
 
 # -- the staging areas ------------------------------------------------------
@@ -468,13 +537,16 @@ class _StageBase:
                 f"the staged version of {str(self._target)!r} was discarded"
             )
 
-    def _failed(self, error: BaseException) -> CommitError:
-        # The target is as it was (or restored); with keep_on_failure, keep
-        # the staged data, past garbage collection too, for another commit.
+    def _failed(
+        self, error: BaseException, previous: tx.Optional[str] = None
+    ) -> CommitError:
+        # Keep the staged data, past garbage collection too, for another
+        # commit: on request (keep_on_failure), or because the target was
+        # changed before the failure and nothing may be removed.
         self._state = _FAILED
         if self._finalizer is not None:
             self._finalizer.detach()
-        return CommitError(self._target, self._entry, error)
+        return CommitError(self._target, self._entry, error, previous=previous)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({str(self._target)!r})"
@@ -535,11 +607,16 @@ class Stage(_StageBase):
         try:
             if self._local:
                 _commit_local(
-                    self._entry, self._real, self._dir, self._target,
+                    self._entry, self._real, self._target,
                     self._replace_type,
                 )
             else:
                 _commit_remote(self._entry, self._target, self._replace_type)
+        except _TargetChanged as changed:
+            # Whatever the options: removing anything now could lose data.
+            raise self._failed(
+                changed.error, changed.previous
+            ) from changed.error
         except Exception as error:
             if self._keep_on_failure:
                 raise self._failed(error) from error
@@ -644,7 +721,7 @@ class AsyncStage(_StageBase):
         try:
             if self._local:
                 await bridge.run(
-                    _commit_local, self._entry, self._real, self._dir,
+                    _commit_local, self._entry, self._real,
                     self._target, self._replace_type,
                 )
             elif self._native_remote():
@@ -656,6 +733,11 @@ class AsyncStage(_StageBase):
                     _commit_remote, self._entry, self._target._sync(),
                     self._replace_type,
                 )
+        except _TargetChanged as changed:
+            # Whatever the options: removing anything now could lose data.
+            raise self._failed(
+                changed.error, changed.previous
+            ) from changed.error
         except Exception as error:
             if self._keep_on_failure:
                 raise self._failed(error) from error
