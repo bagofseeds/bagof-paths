@@ -95,24 +95,39 @@ class CommitError(OSError):
     """A staged version could not be moved onto its target.
 
     Raised by `commit` on the staging area that
-    [`Path.staged`][bagof.paths.Path.staged] returns. The target is left as
-    it was (or restored). `target` is the path the data was meant for, and
-    the original error is chained as `__cause__`; an `errno` from it is
-    carried over. The staged data is removed, and `staged` is `None`, unless
-    the stage was made with `keep_on_failure=True`: then the data is kept,
-    so the work is not lost, and `staged` is its location. It is an
-    `OSError`, so an `except OSError` around a write still catches it.
+    [`Path.staged`][bagof.paths.Path.staged] returns. `target` is the path
+    the data was meant for, and the original error is chained as
+    `__cause__`; an `errno` from it is carried over. It is an `OSError`, so
+    an `except OSError` around a write still catches it.
+
+    Usually the target is left as it was (or restored), the staged data is
+    removed, and `staged` is `None`. The data is kept, and `staged` is its
+    location, when the stage was made with `keep_on_failure=True`, and
+    always when the commit had already changed the target before it failed
+    (a remote directory uploaded in part, say): it may then be the only
+    complete version. When an old directory was moved aside and could not
+    be put back, `previous` is where it is; it is never removed.
     """
 
     def __init__(
-        self, target: tx.Any, staged: tx.Any, error: BaseException
+        self,
+        target: tx.Any,
+        staged: tx.Any,
+        error: BaseException,
+        previous: tx.Any = None,
     ) -> None:
         self.target = target
         self.staged = staged
+        self.previous = previous
         message = (
             f"could not commit the staged version of {str(target)!r} "
             f"({error}); "
         )
+        if previous is not None:
+            message += (
+                "its previous version could not be put back and is kept at "
+                f"{str(previous)!r}; "
+            )
         if staged is None:
             message += "the staged data was removed"
         else:
@@ -127,4 +142,7 @@ class CommitError(OSError):
     def __reduce__(self) -> tx.Any:
         # OSError pickles its args, which do not match this constructor; a
         # worker process must still be able to send the error back.
-        return (type(self), (self.target, self.staged, self._error))
+        return (
+            type(self),
+            (self.target, self.staged, self._error, self.previous),
+        )

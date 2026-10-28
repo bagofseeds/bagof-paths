@@ -571,8 +571,19 @@ registry.
   the target as it was (or restored), removes the staged data and raises
   `CommitError(OSError)`; with `keep_on_failure=True` it keeps the data,
   past garbage collection, for another `commit()` (#46: cleaning up after
-  ourselves is the default, keeping costly work is the opt-in). A dropped
-  stage is cleaned by a finalizer. `copy=True` starts the staged entry as a
+  ourselves is the default, keeping costly work is the opt-in). Cleaning up
+  stops at the point of no return (#57): a failure after the commit has
+  started changing the target removes nothing, whatever the options. A
+  remote directory uploaded in part, or one replaced by a file after the
+  old tree was deleted, keeps the staged data (it may be the only complete
+  version). A local directory is swapped by moving the old one aside into
+  a hidden `.<name>.old-*` directory of its own beside the target -- never
+  into the staging directory, so neither `discard()` nor a later commit can
+  reach it -- and if the new one cannot be moved in nor the old one moved
+  back, the old one stays there for good and `CommitError.previous` names
+  it. On every failure path the holder is removed with `os.rmdir`, which
+  refuses a directory that still holds data. A dropped stage is cleaned by
+  a finalizer. `copy=True` starts the staged entry as a
   copy (a download, for a remote target) for read-modify-write jobs.
   A change between file and directory is refused by default, as `pathlib`
   and `os.replace` refuse it (`CommitError` with `EISDIR` or `ENOTDIR`, the

@@ -340,6 +340,12 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
           The `atomic=True` writers raise the original error rather than
           `CommitError`, as the plain writers would, and refuse a directory
           at this path, as the plain writers do.
+        - A failure that leaves this path changed is the exception: a remote
+          directory uploaded in part, or an old directory that could not be
+          moved back. Then nothing is removed, whatever the options: the
+          staged data is kept, and the old directory is left in a hidden
+          directory beside this path, never removed; `CommitError` says
+          where both are.
 
         An error raised while your code writes at the staged path names the
         staged path, since that is the path it wrote. The `atomic=True`
@@ -348,11 +354,12 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
         The staging area is a hidden directory beside this path (beside the
         file a symbolic link names), so the move stays on one file system; a
-        remote path is staged in a local temporary directory. A crash can
-        leave the hidden directory behind. Replacing a file gives it a new
-        inode, so other hard links keep the old content; the old file's
-        permissions are kept. On Windows, the replacement fails while
-        another process has the file open.
+        remote path is staged in a local temporary directory. While a
+        directory is replaced, the old one waits in a second hidden
+        directory beside this path. A crash can leave either behind.
+        Replacing a file gives it a new inode, so other hard links keep the
+        old content; the old file's permissions are kept. On Windows, the
+        replacement fails while another process has the file open.
         """
         return _staged.Stage(
             self, copy=copy, replace_type=replace_type,

@@ -128,7 +128,10 @@ name would collide.
   in, move back on failure; remote: upload, never a streamed write, since
   fsspec commits on close even after an error). A failed commit removes the
   staged data and raises `CommitError` (`keep_on_failure=True` keeps it for
-  another commit). `atomic=` on the writers is built on it
+  another commit) -- unless it failed after changing the target
+  (`_TargetChanged`): then nothing is removed, and an old directory that
+  could not be moved back stays in its own `.<name>.old-*` beside the
+  target, named by `CommitError.previous` (#57). `atomic=` on the writers is built on it
   (`AtomicStage`/`AsyncAtomicStage`, `atomic()`/`aatomic()`) and must act as
   the plain write wherever the stage would show: it refuses a directory
   (#45), a failure leaves nothing behind and raises the error itself (#46),
