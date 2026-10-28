@@ -633,15 +633,23 @@ class BaseWrapper:
     # pathlib 3.14 takes any argument with `with_segments` for one of its own
     # paths and reads two private members from it: `relative_to` reads
     # `_tail`, and `copy`/`copy_into`/`move` call `target._copy_from(...)`.
-    # Both are present, unchanged, from 3.14.0 to the 3.15 development
-    # branch. They are answered here from the public surface only, so that
-    # a wrapper argument behaves as the os.PathLike it is. No earlier
-    # pathlib reads either name.
+    # Both are present, unchanged, from 3.14.0 to 3.15. pathlib 3.15 also
+    # reads `__vfspath__` from the target's class: `copy` names both paths
+    # in the error when they are the same, and requires the member to do
+    # so. They are answered here from the public surface only, so that a
+    # wrapper argument behaves as the os.PathLike it is. No earlier pathlib
+    # reads any of these names.
     @property
     def _tail(self) -> tx.List[str]:
         # pathlib's `_tail`: the parts after the anchor.
         parts = list(self.parts)
         return parts[1:] if self.anchor else parts
+
+    def __vfspath__(self) -> str:
+        # pathlib's own paths answer with `str(self)`: the path as it is
+        # written, the URL for a remote path. pathlib uses it only to name
+        # the path, never to open it.
+        return str(self)
 
     def _copy_from(self, source: tx.Any, **kwargs: tx.Any) -> None:
         # pathlib's `copy` has checked the paths are distinct and calls this

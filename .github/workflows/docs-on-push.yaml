@@ -10,6 +10,12 @@ permissions:
   pages: write
   id-token: write
 
+# Pages allows one deployment at a time: queue a push's deploy behind the
+# one in progress instead of failing it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   deploy:
     uses: ./.github/workflows/docs.yaml
