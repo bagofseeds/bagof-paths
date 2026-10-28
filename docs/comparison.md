@@ -109,6 +109,11 @@ there, on `path.wrapped`.
   another without a token or a version riding along. The path itself keeps
   the query, so a read still sends it. `without_query()` gives the whole
   path without it.
+* **Writes that never leave a broken file.** `staged()` builds the new
+  version (a file or a directory) beside the target and moves it in when your
+  code is done, or not at all if it fails; `atomic=True` does the same for
+  `write_bytes`, `write_text` and `open`. It works on cloud paths too, and a
+  library that saves by file name sees the target's own name.
 * **An `await` version.** `AsyncPath` gives you the same methods as coroutines.
   It runs a blocking library in a background thread, so your event loop keeps
   moving.

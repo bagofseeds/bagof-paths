@@ -102,6 +102,29 @@ from bagof.paths import set_storage_options
 set_storage_options("s3", {"endpoint_url": "https://minio.local"})
 ```
 
+## Writing safely
+
+A writer that fails halfway leaves a broken file, and a reader that has the
+file open, or memory-mapped, can see a torn one. `staged()` gives a staging
+area named like the target: create the new version there, and it replaces
+the target in one step when the block ends. An error leaves the target as it
+was.
+
+```python
+with Path("out/scan.nii.gz").staged() as tmp:
+    nibabel.save(image, tmp)          # a library that saves by name
+
+with Path("s3://bucket/store.zarr").staged() as tmp:
+    zarr.save(tmp, data)              # staged locally, uploaded on success
+
+Path("out/table.csv").write_text(text, atomic=True)
+```
+
+The new version can be a file or a whole directory. `staged(copy=True)` starts
+it as a copy of the current one, for updates in place (on a remote path, that
+is a full download). A file is replaced atomically on POSIX and on object
+stores; a directory is all-or-nothing, but briefly missing while it is swapped.
+
 ## Async
 
 `AsyncPath` turns the methods that touch storage into coroutines. The methods
