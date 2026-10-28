@@ -39,21 +39,40 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- status queries ----------------------------------------------------
     def exists(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path exists."""
+        """Whether the path exists.
+
+        On a local path this follows Python 3.14 on every version: an
+        error returns False rather than raising. A name too long for the
+        file system is not there, and neither is one whose parent you may
+        not search. To see the error, call `stat()`, which still raises.
+        The other status checks (`is_file`, `is_dir`, `is_symlink`, ...)
+        do the same.
+
+        ```pycon
+        >>> Path("a" * 300).exists()
+        False
+        ```
+        """
         return engine.invoke(
             self, BY_NAME["exists"], (),
             {"follow_symlinks": follow_symlinks},
         )
 
     def is_file(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path is a regular file."""
+        """Whether the path is a regular file.
+
+        Like `exists`, it returns False on an error on a local path.
+        """
         return engine.invoke(
             self, BY_NAME["is_file"], (),
             {"follow_symlinks": follow_symlinks},
         )
 
     def is_dir(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path is a directory."""
+        """Whether the path is a directory.
+
+        Like `exists`, it returns False on an error on a local path.
+        """
         return engine.invoke(
             self, BY_NAME["is_dir"], (),
             {"follow_symlinks": follow_symlinks},

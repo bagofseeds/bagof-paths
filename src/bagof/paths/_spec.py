@@ -32,6 +32,9 @@ class Member(tx.NamedTuple):
     fallback: tx.Optional[str] = None
     # Primitives the fallback needs; if any is missing the member raises.
     needs: tx.Tuple[str, ...] = ()
+    # A status check (exists, is_file, ...): on a local path it answers False
+    # rather than raise an OSError or ValueError, as Python 3.14 does.
+    check: bool = False
 
 
 # The pure-path surface: lexical members that every driver either implements
@@ -84,10 +87,10 @@ PURE_PATH_MEMBERS = (
 IO_MEMBERS = (
     # status queries -- follow_symlinks is forwarded only when False, so a
     # driver whose signature predates the keyword still works by default.
-    Member("exists", IO, normalize=(("follow_symlinks", True),)),
-    Member("is_file", IO, normalize=(("follow_symlinks", True),)),
-    Member("is_dir", IO, normalize=(("follow_symlinks", True),)),
-    Member("is_symlink", IO),
+    Member("exists", IO, normalize=(("follow_symlinks", True),), check=True),
+    Member("is_file", IO, normalize=(("follow_symlinks", True),), check=True),
+    Member("is_dir", IO, normalize=(("follow_symlinks", True),), check=True),
+    Member("is_symlink", IO, check=True),
     Member("stat", IO, normalize=(("follow_symlinks", True),)),
     Member("lstat", IO),
     Member("samefile", IO),
@@ -141,14 +144,14 @@ IO_MEMBERS = (
     # -- extended status queries (pathlib/universal-pathlib) ----------------
     # Special-file and mount tests; delegate-or-raise (a driver without the
     # concept -- most cloud backends -- reports it as unsupported).
-    Member("is_mount", IO),
-    Member("is_socket", IO),
-    Member("is_fifo", IO),
-    Member("is_block_device", IO),
-    Member("is_char_device", IO),
+    Member("is_mount", IO, check=True),
+    Member("is_socket", IO, check=True),
+    Member("is_fifo", IO, check=True),
+    Member("is_block_device", IO, check=True),
+    Member("is_char_device", IO, check=True),
     # is_junction is 3.12+/cloud; synthesize False where the concept is absent
     # so the answer is uniform across drivers and interpreter versions.
-    Member("is_junction", IO, fallback="is_junction"),
+    Member("is_junction", IO, fallback="is_junction", check=True),
     # -- permissions and ownership ------------------------------------------
     # follow_symlinks reached pathlib.chmod/owner/group in 3.13; forward it
     # only when False/non-default so older signatures still accept the call.
