@@ -96,11 +96,12 @@ class CommitError(OSError):
 
     Raised by `commit` on the staging area that
     [`Path.staged`][bagof.paths.Path.staged] returns. The target is left as
-    it was (or restored), and the staged data is kept, so the work is not
-    lost: the `staged` attribute is its location, `target` the path it was
-    meant for, and the original error is chained as `__cause__`. An
-    `errno` from that error is carried over. It is an `OSError`, so an
-    `except OSError` around a write still catches it.
+    it was (or restored). `target` is the path the data was meant for, and
+    the original error is chained as `__cause__`; an `errno` from it is
+    carried over. The staged data is removed, and `staged` is `None`, unless
+    the stage was made with `keep_on_failure=True`: then the data is kept,
+    so the work is not lost, and `staged` is its location. It is an
+    `OSError`, so an `except OSError` around a write still catches it.
     """
 
     def __init__(
@@ -110,8 +111,12 @@ class CommitError(OSError):
         self.staged = staged
         message = (
             f"could not commit the staged version of {str(target)!r} "
-            f"({error}); the staged data is kept at {str(staged)!r}"
+            f"({error}); "
         )
+        if staged is None:
+            message += "the staged data was removed"
+        else:
+            message += f"the staged data is kept at {str(staged)!r}"
         code = getattr(error, "errno", None)
         if isinstance(code, int):
             super().__init__(code, message)

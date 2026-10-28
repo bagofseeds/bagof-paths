@@ -224,7 +224,7 @@ def test_a_failed_replace_keeps_target_and_staged_data(
 ) -> None:
     (tmp_path / "x.txt").write_text("old")
     target = Path(tmp_path / "x.txt")
-    stage = target.staged()
+    stage = target.staged(keep_on_failure=True)
     stage.path.write_text("new")
 
     def refuse(src: str, dst: str) -> None:
@@ -256,7 +256,7 @@ def test_a_failed_directory_swap_restores_the_old_one(
 ) -> None:
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "old").write_text("1")
-    stage = Path(tmp_path / "out").staged()
+    stage = Path(tmp_path / "out").staged(keep_on_failure=True)
     stage.path.mkdir()
     (stage.path / "new").write_text("2")
 
@@ -464,7 +464,7 @@ def test_a_failed_upload_keeps_target_and_staged_data(
 ) -> None:
     target = Path("memory://bucket/x.txt")
     target.write_text("old")
-    stage = target.staged()
+    stage = target.staged(keep_on_failure=True)
     stage.path.write_text("new")
 
     def refuse(local: str, remote: tx.Any) -> None:
@@ -698,7 +698,9 @@ def test_async_failed_commit_keeps_the_staged_data(
         raise PermissionError(errno.EACCES, "in use")
 
     async def go() -> None:
-        stage = await AsyncPath(tmp_path / "x.txt").staged()
+        stage = await AsyncPath(tmp_path / "x.txt").staged(
+            keep_on_failure=True
+        )
         await stage.path.write_text("new")
         monkeypatch.setattr(staged_module, "_commit_local", refuse)
         with pytest.raises(CommitError) as info:
@@ -808,6 +810,10 @@ def test_commit_error_survives_pickling(tmp_path: pathlib.Path) -> None:
     assert str(copy) == str(error)
     assert copy.target == error.target and copy.staged == error.staged
 
+    removed = CommitError(Path(tmp_path / "x"), None, OSError("boom"))
+    copy = pickle.loads(pickle.dumps(removed))
+    assert copy.staged is None and str(copy) == str(removed)
+
 
 def test_native_driver_with_nothing_to_copy_or_commit(native: str) -> None:
     async def go() -> None:
@@ -830,9 +836,78 @@ def test_a_staging_directory_that_cannot_be_made_raises(
         Path(tmp_path / "x.txt").staged()
 
 
-# -- a failed atomic write leaves nothing behind (issue #46) ------------------
-# staged() keeps its data in CommitError (tested above); atomic= drops it and
-# raises the error itself, as the plain write would.
+# -- a failed commit leaves nothing behind (issue #46) ------------------------
+# staged() removes its data and raises CommitError, unless keep_on_failure
+# (tested above); atomic= removes it and raises the error itself, as the
+# plain write would.
+@pytest.mark.parametrize("front", ["sync", "async"])
+def test_a_failed_commit_removes_the_staged_data(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
+) -> None:
+    target = tmp_path / "x.txt"
+    target.write_text("old")
+
+    def refuse(src: str, dst: str) -> None:
+        raise PermissionError(errno.EACCES, "in use")
+
+    async def go() -> None:
+        async with AsyncPath(target).staged() as tmp:
+            await tmp.write_text("new")
+
+    monkeypatch.setattr(staged_module.os, "replace", refuse)
+    with pytest.raises(CommitError) as info:
+        if front == "sync":
+            with Path(target).staged() as tmp:
+                tmp.write_text("new")
+        else:
+            _run(go())
+    error = info.value
+    assert error.errno == errno.EACCES
+    assert isinstance(error.__cause__, PermissionError)
+    assert error.staged is None
+    assert "removed" in str(error)
+    assert target.read_text() == "old"
+    assert _listing(tmp_path) == ["x.txt"]
+
+
+def test_a_stage_whose_commit_failed_is_discarded(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage = Path(tmp_path / "x.txt").staged()
+    stage.path.write_text("new")
+
+    def refuse(src: str, dst: str) -> None:
+        raise PermissionError(errno.EACCES, "in use")
+
+    monkeypatch.setattr(staged_module.os, "replace", refuse)
+    with pytest.raises(CommitError):
+        stage.commit()
+    monkeypatch.undo()
+    with pytest.raises(ValueError, match="discarded"):
+        stage.commit()
+    assert _listing(tmp_path) == []
+
+
+def test_a_failed_remote_commit_removes_the_staged_data(
+    memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = Path("memory://bucket/x.txt")
+    target.write_text("old")
+    stage = target.staged()
+    stage.path.write_text("new")
+    staging = pathlib.Path(str(stage.path)).parent
+
+    def refuse(local: str, remote: tx.Any) -> None:
+        raise ConnectionError("network down")
+
+    monkeypatch.setattr(staged_module, "_upload_file", refuse)
+    with pytest.raises(CommitError, match="network down") as info:
+        stage.commit()
+    assert info.value.staged is None
+    assert target.read_text() == "old"
+    assert not staging.exists()
+
+
 @pytest.mark.parametrize("front", ["sync", "async"])
 def test_a_failed_atomic_commit_leaves_nothing_behind(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
