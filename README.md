@@ -146,6 +146,22 @@ PurePath('/data/sets/train.zip')
 True
 ```
 
+A URL's query and fragment are not part of its name, so a presigned or
+versioned URL still has the right suffix. The path keeps them, so a read
+still sends the token.
+
+```pycon
+>>> url = PurePath("https://example.org/data/brain.nii.gz?token=abc")
+>>> url.name
+'brain.nii.gz'
+>>> url.suffixes
+['.nii', '.gz']
+>>> url.parent
+PurePath('https://example.org/data')
+>>> str(url)
+'https://example.org/data/brain.nii.gz?token=abc'
+```
+
 A `PurePath` and a `Path` to the same place compare equal and hash alike, so
 either one looks the other up in a set or a dictionary. This mirrors
 `pathlib`, where a `PurePath` equals the `Path` beside it.

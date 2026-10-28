@@ -37,7 +37,13 @@ from ._constants import (
 )
 from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
-from ._protocols import canonical_scheme, merged_storage_options, traits_for
+from ._protocols import (
+    canonical_scheme,
+    has_query,
+    merged_storage_options,
+    strip_query,
+    traits_for,
+)
 from ._spec import BY_NAME
 
 _MISSING = object()
@@ -262,6 +268,38 @@ class BaseWrapper:
             return type(wrapped)(target)
         return target
 
+    # -- the path without its URL query -----------------------------------
+    def _query_free(self) -> tx.Self:
+        """This path without its URL query and fragment.
+
+        The lexical members run on this view: a query (a token, a version id)
+        and a fragment are not part of the path, so they are not part of its
+        name, its parts or its parent. The path itself keeps them, since I/O
+        may need them to reach the object. A derived path does not carry them,
+        as in URL resolution (RFC 3986): it names a different object.
+        """
+        wrapped = self._wrapped
+        if not has_query(self.protocol):
+            return self
+        text = str(wrapped)
+        bare = strip_query(text)
+        rebuild = getattr(wrapped, "with_segments", None)
+        if bare == text or not callable(rebuild):
+            # A driver that cannot rebuild itself from a string keeps its own
+            # answer rather than lose its configuration.
+            return self
+        return self.with_wrapped(rebuild(bare))
+
+    def _query_free_arg(self, other: tx.Any) -> tx.Any:
+        """A path argument without its URL query, as `_query_free` does."""
+        if isinstance(other, BaseWrapper):
+            return other._query_free()
+        if isinstance(other, str):
+            match = SCHEME_RE.match(other)
+            if match and has_query(match.group(1).lower()):
+                return strip_query(other)
+        return other
+
     # -- location (generic; refined per-driver by the adapter layer) --------
     @property
     def protocol(self) -> str:
@@ -416,7 +454,7 @@ class BaseWrapper:
     def __truediv__(self, other: tx.Any) -> tx.Self:
         if isinstance(other, BaseWrapper):
             other = other._wrapped
-        return self.with_wrapped(self._wrapped / other)
+        return self.with_wrapped(self._query_free()._wrapped / other)
 
     def __rtruediv__(self, other: tx.Any) -> tx.Self:
         if isinstance(other, BaseWrapper):

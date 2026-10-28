@@ -667,3 +667,15 @@ def test_freeze_is_hashable() -> None:
     # falls back to repr) all collapse to something hashable.
     token = _freeze({"a": 1, "nested": {"k": [1, 2]}, "unhashable": {1, 2}})
     assert isinstance(hash(token), int)
+
+
+def test_native_driver_leaves_out_the_query() -> None:
+    # The native async driver keeps the query in its path, for I/O, and the
+    # lexical members leave it out, as on every other driver.
+    p = AsyncPath("memasync://b/dir/x.nii.gz?v=1")
+    assert isinstance(p.wrapped, AsyncFSPath)
+    assert str(p) == "memasync://b/dir/x.nii.gz?v=1"
+    assert p.name == "x.nii.gz"
+    assert p.suffixes == [".nii", ".gz"]
+    assert str(p.parent) == "memasync://b/dir"
+    assert isinstance(p.parent.wrapped, AsyncFSPath)

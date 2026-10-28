@@ -379,6 +379,22 @@ registry.
     real paths and differs only for these pathological spellings. Reproducing
     the raw form lexically is not possible without re-implementing each
     backend's `_strip_protocol`, so this is a documented residual divergence.
+- **A URL's query and fragment [settled].** Every neighbour treats them as
+  part of the last segment (measured: universal-pathlib 0.3.10,
+  cloudpathlib 0.26.0 via `LocalS3Path`, and the lexical driver all give
+  `name == 'x.nii.gz?token=1'`; a `/` inside the query is taken as a
+  separator). The wrapper follows RFC 3986 instead: the lexical members
+  (`name`/`stem`/`suffix(es)`/`parts`/`parent(s)`, `match`/`full_match`,
+  `relative_to`) run on the path without the query and the fragment. The
+  string, the `path`, the identity key and every I/O call keep them, since
+  they may be what reaches the object (a presigned token; universal-pathlib's
+  S3 `?versionId=`, which turns `version_aware` on). A derived path
+  (`parent`, `with_*`, `/`, `joinpath`) drops them, as `urljoin` does: it
+  names a different object. A local path has no query, so `?`/`#` stay
+  ordinary characters there. A scheme whose keys hold `?`/`#` literally opts
+  out with the `query=False` protocol trait. The query-free view is rebuilt
+  through the driver's own `with_segments`, so its configuration (storage
+  options, a client) rides along; a driver without one keeps its own answer.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/

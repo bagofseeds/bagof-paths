@@ -15,7 +15,11 @@ from ._spec import BY_NAME
 
 
 class PurePathMixin:
-    """Lexical path operations, delegated or computed on the canonical path."""
+    """Lexical path operations, delegated or computed on the canonical path.
+
+    A URL's query and fragment are not part of its path, so every member
+    here that reads or derives a path runs on the path without them.
+    """
 
     # No instance state: keeps the wrappers slotted (no __dict__ leaks in).
     __slots__ = ()
@@ -24,54 +28,62 @@ class PurePathMixin:
     @property
     def name(self) -> str:
         """The final path component."""
-        return engine.get(self, BY_NAME["name"])
+        return engine.get(self._query_free(), BY_NAME["name"])
 
     @property
     def stem(self) -> str:
         """The final component without its suffix."""
-        return engine.get(self, BY_NAME["stem"])
+        return engine.get(self._query_free(), BY_NAME["stem"])
 
     @property
     def suffix(self) -> str:
         """The final component's last suffix, including the leading dot."""
-        return engine.get(self, BY_NAME["suffix"])
+        return engine.get(self._query_free(), BY_NAME["suffix"])
 
     @property
     def suffixes(self) -> tx.List[str]:
         """The final component's suffixes, each including its dot."""
-        return engine.get(self, BY_NAME["suffixes"])
+        return engine.get(self._query_free(), BY_NAME["suffixes"])
 
     @property
     def parts(self) -> tx.Tuple[str, ...]:
         """The path's components."""
-        return engine.get(self, BY_NAME["parts"])
+        return engine.get(self._query_free(), BY_NAME["parts"])
 
     @property
     def parent(self) -> tx.Self:
         """The logical parent of the path."""
-        return engine.get(self, BY_NAME["parent"])
+        return engine.get(self._query_free(), BY_NAME["parent"])
 
     @property
     def parents(self) -> tx.Tuple[tx.Self, ...]:
         """The logical ancestors of the path, closest first."""
-        return engine.get(self, BY_NAME["parents"])
+        return engine.get(self._query_free(), BY_NAME["parents"])
 
     # -- pure-path methods -------------------------------------------------
     def joinpath(self, *segments: tx.Any) -> tx.Self:
         """Combine the path with each of the given segments."""
-        return engine.invoke(self, BY_NAME["joinpath"], segments)
+        return engine.invoke(
+            self._query_free(), BY_NAME["joinpath"], segments
+        )
 
     def with_name(self, name: str) -> tx.Self:
         """A new path with the final component changed to `name`."""
-        return engine.invoke(self, BY_NAME["with_name"], (name,))
+        return engine.invoke(
+            self._query_free(), BY_NAME["with_name"], (name,)
+        )
 
     def with_stem(self, stem: str) -> tx.Self:
         """A new path with the stem changed to `stem`."""
-        return engine.invoke(self, BY_NAME["with_stem"], (stem,))
+        return engine.invoke(
+            self._query_free(), BY_NAME["with_stem"], (stem,)
+        )
 
     def with_suffix(self, suffix: str) -> tx.Self:
         """A new path with the suffix changed to `suffix`."""
-        return engine.invoke(self, BY_NAME["with_suffix"], (suffix,))
+        return engine.invoke(
+            self._query_free(), BY_NAME["with_suffix"], (suffix,)
+        )
 
     def with_segments(self, *segments: tx.Any) -> tx.Self:
         """A new path of the same kind built from the given segments."""
@@ -99,12 +111,16 @@ class PurePathMixin:
 
     def is_relative_to(self, other: tx.Any) -> bool:
         """Whether the path is relative to `other`."""
-        return engine.invoke(self, BY_NAME["is_relative_to"], (other,))
+        return engine.invoke(
+            self._query_free(), BY_NAME["is_relative_to"],
+            (self._query_free_arg(other),),
+        )
 
     def relative_to(self, other: tx.Any, *, walk_up: bool = False) -> tx.Self:
         """The path made relative to `other`."""
         return engine.invoke(
-            self, BY_NAME["relative_to"], (other,), {"walk_up": walk_up}
+            self._query_free(), BY_NAME["relative_to"],
+            (self._query_free_arg(other),), {"walk_up": walk_up},
         )
 
     def match(
@@ -115,7 +131,9 @@ class PurePathMixin:
         Matching is lexical and consistent across drivers: it runs on the
         canonical path, not on the wrapped object.
         """
-        return _match.match(self.path, pattern, case_sensitive=case_sensitive)
+        return _match.match(
+            self._query_free().path, pattern, case_sensitive=case_sensitive
+        )
 
     def full_match(
         self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
@@ -125,5 +143,5 @@ class PurePathMixin:
         Uses CPython 3.13's glob semantics on every interpreter.
         """
         return _match.full_match(
-            self.path, pattern, case_sensitive=case_sensitive
+            self._query_free().path, pattern, case_sensitive=case_sensitive
         )

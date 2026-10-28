@@ -66,6 +66,7 @@ tests/
   test_internals.py, test_drivers.py, test_async.py
   test_parity_gap.py          # the pathlib/UPath/cloud surface parity
   test_driver_selection.py    # URL construction + register_protocol
+  test_url_query.py           # a URL's query/fragment stay out of the name
   test_parity.py              # sync/async surfaces stay in lockstep
   test_docstrings.py          # every pycon block in a docstring or page
   test_licensing.py
@@ -92,6 +93,11 @@ name would collide.
   wrappers inherit them as the same synchronous methods. IO members are the
   only thing written twice (a sync method on `Path`, an async one on
   `AsyncPath`); `test_parity.py` fails the moment the two drift.
+- **A URL's query and fragment are not part of its path.** The lexical
+  members run on `BaseWrapper._query_free()`, the driver rebuilt (via its own
+  `with_segments`) without them; the string, `.path`, identity and I/O keep
+  them. A derived path drops them (RFC 3986 resolution). Local paths, and a
+  scheme registered with `query=False`, keep `?`/`#` as ordinary characters.
 - **`_drivers.py` absorbs the operations backends genuinely disagree on** —
   `rmdir` recursion, native `copy`/`move`, `walk` — behind adapters selected
   by driver type. A `GenericAdapter` duck-types any driver; named subclasses

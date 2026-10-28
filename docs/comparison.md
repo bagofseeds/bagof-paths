@@ -101,6 +101,10 @@ there, on `path.wrapped`.
 * **Paths compare by where they point.** Two paths to the same place are equal
   even when they come from different libraries. Different spellings of a scheme
   (`s3` and `s3a`, `gs` and `gcs`) count as the same.
+* **A URL's query is not part of its name.** The name, suffix and parent of
+  `https://host/x.nii.gz?token=1` are `x.nii.gz`, `.gz` and
+  `https://host`. The path itself keeps the query, so a read still sends
+  the token.
 * **An `await` version.** `AsyncPath` gives you the same methods as coroutines.
   It runs a blocking library in a background thread, so your event loop keeps
   moving.

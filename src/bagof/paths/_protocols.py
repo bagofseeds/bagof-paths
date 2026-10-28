@@ -2,11 +2,11 @@
 
 A scheme's *behaviour* is data, not a class (see the design's construction
 section): whether its first path component is a bucket, which spellings name
-the same store, whether it is always absolute, and which driver to prefer when
-building one. The base wrapper and the driver selector read this registry; a
-downstream adds a protocol with one
-[`register_protocol`][bagof.paths.register_protocol] call rather than
-a subclass.
+the same store, whether it is always absolute, whether its URLs carry a query
+and a fragment, and which driver to prefer when building one. The base wrapper
+and the driver selector read this registry; a downstream adds a protocol with
+one [`register_protocol`][bagof.paths.register_protocol] call rather than a
+subclass.
 
 `ProtocolTraits` takes keyword arguments only, so a new trait can be added
 later without shifting a positional and breaking a caller. Register protocols
@@ -18,6 +18,8 @@ would change their hashes.
 from __future__ import annotations
 
 import typing_extensions as tx
+
+from ._constants import LOCAL_PROTOCOLS
 
 
 class ProtocolTraits:
@@ -33,6 +35,11 @@ class ProtocolTraits:
     aliases:
         Other schemes that name the same store (`s3a` for `s3`); folded
         onto this scheme for identity so the spellings compare equal.
+    query:
+        A `?` or `#` in a URL of this scheme starts its query and
+        fragment, which the path's name, parts and parent leave out. On by
+        default; turn it off for a store whose keys may contain `?` or
+        `#` as ordinary characters.
     driver:
         A preferred factory (a driver class, or a `str -> path` callable)
         used to build a path of this scheme before the availability order.
@@ -44,7 +51,8 @@ class ProtocolTraits:
     """
 
     __slots__ = (
-        "bucketed", "absolute", "aliases", "driver", "storage_options",
+        "bucketed", "absolute", "aliases", "query", "driver",
+        "storage_options",
     )
 
     def __init__(
@@ -53,12 +61,14 @@ class ProtocolTraits:
         bucketed: bool = False,
         absolute: bool = False,
         aliases: tx.Iterable[str] = (),
+        query: bool = True,
         driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
         storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> None:
         self.bucketed = bucketed
         self.absolute = absolute
         self.aliases = tuple(aliases)
+        self.query = query
         self.driver = driver
         self.storage_options = dict(storage_options or {})
 
@@ -71,7 +81,8 @@ class ProtocolTraits:
         return (
             "ProtocolTraits("
             f"bucketed={self.bucketed!r}, absolute={self.absolute!r}, "
-            f"aliases={self.aliases!r}, driver={_driver_name(self.driver)}, "
+            f"aliases={self.aliases!r}, query={self.query!r}, "
+            f"driver={_driver_name(self.driver)}, "
             f"storage_options={options})"
         )
 
@@ -97,6 +108,7 @@ def register_protocol(
     bucketed: bool = False,
     absolute: bool = False,
     aliases: tx.Iterable[str] = (),
+    query: bool = True,
     driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> None:
@@ -115,6 +127,9 @@ def register_protocol(
     credentials, ...) forwarded to the driver for every path of this scheme;
     a per-call `storage_options` overrides them key by key.
 
+    `query=False` says a `?` or `#` in this scheme's URLs is an ordinary
+    character of the path, not the start of a query or a fragment.
+
     Register at import time -- see the module note on identity.
     """
     scheme = scheme.lower()
@@ -131,6 +146,7 @@ def register_protocol(
         bucketed=bucketed,
         absolute=absolute,
         aliases=new_aliases,
+        query=query,
         driver=driver,
         storage_options=storage_options,
     )
@@ -168,6 +184,7 @@ def set_storage_options(
         bucketed=current.bucketed,
         absolute=current.absolute,
         aliases=current.aliases,
+        query=current.query,
         driver=current.driver,
         storage_options=storage_options,
     )
@@ -184,6 +201,28 @@ def merged_storage_options(
     base = dict(traits_for(scheme).storage_options) if scheme else {}
     base.update(storage_options or {})
     return base
+
+
+def strip_query(text: str) -> str:
+    """`text` without its URL query and fragment.
+
+    The query starts at the first `?` and the fragment at the first `#`
+    (RFC 3986); whichever comes first ends the path. The search starts after
+    the `scheme://`, so a scheme-less fsspec path is handled the same way.
+    """
+    start = text.find("://")
+    start = 0 if start < 0 else start + 3
+    ends = [text.find(char, start) for char in "?#"]
+    ends = [end for end in ends if end >= 0]
+    return text[:min(ends)] if ends else text
+
+
+def has_query(scheme: str) -> bool:
+    """Whether a `?` or `#` in a URL of `scheme` starts a query or fragment.
+
+    A local path has neither: `?` and `#` are ordinary filename characters.
+    """
+    return scheme not in LOCAL_PROTOCOLS and traits_for(scheme).query
 
 
 def canonical_scheme(scheme: str) -> str:
