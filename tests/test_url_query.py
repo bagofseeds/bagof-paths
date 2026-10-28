@@ -15,6 +15,7 @@ import pathlib
 import sys
 
 import pytest
+import typing_extensions as tx
 
 from bagof.paths import (
     AsyncPath,
@@ -354,3 +355,92 @@ def test_file_uri_matches_python_314_from_uri(uri: str) -> None:
             return "ValueError"
 
     assert read(_local_from_file_uri) == read(pathlib.Path.from_uri)
+
+
+# -- copy_into / move_into / walk: the store's names inside a store --------
+@pytest.fixture
+def _memory_tree() -> tx.Iterator[Path]:
+    pytest.importorskip("upath")
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    MemoryFileSystem.store.clear()
+    src = Path("memory://b/src")
+    for key, data in [("x?v=1", b"one"), ("x?v=2", b"two"),
+                      ("d?s=a/f.txt", b"f")]:
+        (src / key).write_bytes(data)
+    yield src
+    MemoryFileSystem.store.clear()
+
+
+def test_copy_into_the_same_store_keeps_objects_apart(
+    _memory_tree: Path,
+) -> None:
+    # Regression: with the portable name, both copies landed on "dst/x" and
+    # the second silently overwrote the first.
+    src, dst = _memory_tree, Path("memory://b/dst")
+    for key in ("x?v=1", "x?v=2"):
+        (src / key).copy_into(dst)
+    assert sorted(p.read_bytes() for p in dst.iterdir()) == [b"one", b"two"]
+    assert (dst / "x?v=1").read_bytes() == b"one"
+
+
+def test_move_into_the_same_store_keeps_the_store_name(
+    _memory_tree: Path,
+) -> None:
+    src, dst = _memory_tree, Path("memory://b/dst")
+    moved = (src / "x?v=2").move_into(dst)
+    assert str(moved) == "memory://b/dst/x?v=2"
+    assert moved.read_bytes() == b"two"
+
+
+def test_async_copy_into_the_same_store_keeps_objects_apart(
+    _memory_tree: Path,
+) -> None:
+    import asyncio
+
+    async def go() -> list:
+        dst = AsyncPath("memory://b/adst")
+        for key in ("x?v=1", "x?v=2"):
+            await AsyncPath(str(_memory_tree / key)).copy_into(dst)
+        return sorted([await p.read_bytes() async for p in dst.iterdir()])
+
+    assert asyncio.run(go()) == [b"one", b"two"]
+
+
+def test_copy_into_another_store_takes_the_portable_name(
+    _memory_tree: Path, tmp_path: object
+) -> None:
+    out = (_memory_tree / "x?v=1").copy_into(Path(str(tmp_path)))
+    assert out.name == "x"
+    assert (pathlib.Path(str(tmp_path)) / "x").read_bytes() == b"one"
+
+
+def test_into_from_local_keeps_a_local_name(_memory_tree: Path) -> None:
+    # A local name has no query: its "?" is a character, and it travels.
+    local = Path("/tmp/y?.txt")
+    target = local._into(Path("memory://b/dst"))
+    assert str(target) == "memory://b/dst/y?.txt"
+
+
+def test_walk_fallback_reports_the_store_names(_memory_tree: Path) -> None:
+    from bagof.paths._drivers import GenericAdapter
+
+    walked = [
+        (str(d), sorted(files))
+        for d, _, files in GenericAdapter()._walk_fallback(
+            _memory_tree, top_down=True, on_error=None, follow_symlinks=False
+        )
+    ]
+    native = [(str(d), sorted(files)) for d, _, files in _memory_tree.walk()]
+    assert walked == native
+    assert ("memory://b/src", ["x?v=1", "x?v=2"]) in walked
+    assert ("memory://b/src/d?s=a", ["f.txt"]) in walked
+
+
+def test_same_store_folds_aliases_and_local() -> None:
+    pytest.importorskip("upath")
+    s3 = Path("s3://b/x", storage_options={"anon": True})
+    assert s3._same_store(Path("s3a://c/y", storage_options={"anon": True})
+                          .wrapped)
+    assert not s3._same_store(pathlib.Path("/tmp"))
+    assert Path("/tmp/x")._same_store(pathlib.Path("/elsewhere"))

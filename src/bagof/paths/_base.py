@@ -311,6 +311,30 @@ class BaseWrapper:
             return None
         return self.with_wrapped(rebuild(text))
 
+    def _store_name(self) -> str:
+        """The name the driver itself gives this object.
+
+        In a store whose keys hold `?` (s3, gs, memory, ...), two objects can
+        differ only after it, so an operation that stays in the store names
+        a path this way to keep them apart. `name`, which leaves the query
+        out, is the portable name for another store. A path with no query
+        has one name, so `name` (and any override of it) answers.
+        """
+        if self._query_free() is self:
+            return self.name
+        value = getattr(self._wrapped, "name", None)
+        return value if isinstance(value, str) else self.name
+
+    def _same_store(self, other: tx.Any) -> bool:
+        """Whether the driver path `other` is in this path's store."""
+        def store(protocol: str) -> str:
+            if protocol in LOCAL_PROTOCOLS:
+                return ""
+            return canonical_scheme(protocol)
+
+        theirs = self.with_wrapped(other).protocol
+        return store(self.protocol) == store(theirs)
+
     def _query_free_arg(self, other: tx.Any) -> tx.Any:
         """A path argument without its URL query, as `_query_free` does."""
         if isinstance(other, BaseWrapper):
