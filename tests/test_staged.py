@@ -828,3 +828,72 @@ def test_a_staging_directory_that_cannot_be_made_raises(
     monkeypatch.setattr(staged_module.tempfile, "mkdtemp", refuse)
     with pytest.raises(PermissionError):
         Path(tmp_path / "x.txt").staged()
+
+
+# -- a failed atomic write leaves nothing behind (issue #46) ------------------
+# staged() keeps its data in CommitError (tested above); atomic= drops it and
+# raises the error itself, as the plain write would.
+@pytest.mark.parametrize("front", ["sync", "async"])
+def test_a_failed_atomic_commit_leaves_nothing_behind(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
+) -> None:
+    target = tmp_path / "y.bin"
+    target.write_bytes(b"old")
+
+    def refuse(src: str, dst: str) -> None:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(staged_module.os, "replace", refuse)
+    with pytest.raises(PermissionError) as info:
+        if front == "sync":
+            Path(target).write_bytes(b"new", atomic=True)
+        else:
+            _run(AsyncPath(target).write_bytes(b"new", atomic=True))
+    assert not isinstance(info.value, CommitError)
+    assert info.value.errno == errno.EACCES
+    assert target.read_bytes() == b"old"
+    assert _listing(tmp_path) == ["y.bin"]
+
+
+@pytest.mark.parametrize("front", ["sync", "async"])
+def test_a_failed_atomic_close_leaves_nothing_behind(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
+) -> None:
+    target = tmp_path / "y.txt"
+
+    def refuse(src: str, dst: str) -> None:
+        raise OSError(errno.EIO, "boom")
+
+    async def go() -> None:
+        handle = await AsyncPath(target).open("w", atomic=True)
+        await handle.write("new")
+        monkeypatch.setattr(staged_module.os, "replace", refuse)
+        await handle.close()
+
+    with pytest.raises(OSError) as info:
+        if front == "sync":
+            handle = Path(target).open("w", atomic=True)
+            handle.write("new")
+            monkeypatch.setattr(staged_module.os, "replace", refuse)
+            handle.close()
+        else:
+            _run(go())
+    assert info.value.errno == errno.EIO
+    assert not isinstance(info.value, CommitError)
+    assert _listing(tmp_path) == []
+
+
+def test_a_failed_remote_atomic_upload_leaves_nothing_behind(
+    memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = Path("memory://bucket/x.txt")
+    target.write_text("old")
+
+    def refuse(local: str, target: tx.Any) -> None:
+        raise OSError(errno.EIO, "upload failed")
+
+    monkeypatch.setattr(staged_module, "_upload_file", refuse)
+    with pytest.raises(OSError) as info:
+        target.write_text("new", atomic=True)
+    assert not isinstance(info.value, CommitError)
+    assert target.read_text() == "old"

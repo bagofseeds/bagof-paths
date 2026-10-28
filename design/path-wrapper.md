@@ -570,7 +570,13 @@ registry.
   finalizer. `copy=True` starts the staged entry as a copy (a download, for
   a remote target) for read-modify-write jobs. `atomic=` on `write_bytes`,
   `write_text` and `open` is built on it (`open` needs a writing mode;
-  `a`/`r+` start from a copy).
+  `a`/`r+` start from a copy), and is **the plain write, made atomic**:
+  wherever the staging area would otherwise show, it acts as `pathlib`
+  does. A failure, a failed commit included, removes the staging directory
+  and raises the error itself, not `CommitError` (#46): the caller still
+  holds its data and has no stage to commit again. `staged()` keeps its
+  data, since its caller may have built something costly; a caller that
+  wants it dropped keeps the `Stage` and `discard()`s it on `CommitError`.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has

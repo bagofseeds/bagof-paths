@@ -483,7 +483,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
             copy = _staged.check_atomic_mode(mode)
             if "x" in mode and await self.exists():
                 raise _staged.exists_error(self)
-            stage = await self.staged(copy=copy)
+            stage = await _staged.AsyncAtomicStage(self, copy=copy)
             try:
                 handle = await stage.path.open(
                     mode, buffering=buffering, encoding=encoding,
@@ -535,7 +535,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`Path.write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            async with self.staged() as staged:
+            async with _staged.AsyncAtomicStage(self) as staged:
                 return await staged.write_bytes(data)
         return await self._call("write_bytes", (data,))
 
@@ -554,7 +554,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`Path.write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            async with self.staged() as staged:
+            async with _staged.AsyncAtomicStage(self) as staged:
                 return await staged.write_text(
                     data, encoding=encoding, errors=errors, newline=newline
                 )

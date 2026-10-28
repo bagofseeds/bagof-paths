@@ -142,14 +142,15 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         staging area and moved onto the path when it is closed, so readers
         see the old content or the new, never a half-written file; leaving
         a `with` block with an error discards it. An appending or `r+`
-        mode starts from a copy of the current content. See
-        [`staged`][bagof.paths.Path.staged].
+        mode starts from a copy of the current content. If it fails,
+        closing included, it leaves nothing behind and raises the error as
+        the plain `open` would. See [`staged`][bagof.paths.Path.staged].
         """
         if atomic:
             copy = _staged.check_atomic_mode(mode)
             if "x" in mode and self.exists():
                 raise _staged.exists_error(self)
-            stage = self.staged(copy=copy)
+            stage = _staged.AtomicStage(self, copy=copy)
             try:
                 handle = stage.path.open(
                     mode, buffering=buffering, encoding=encoding,
@@ -190,10 +191,11 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
         With `atomic=True` the new content is written beside the file and
         moved over it in one step, so readers never see a partial file
-        (see [`staged`][bagof.paths.Path.staged]).
+        (see [`staged`][bagof.paths.Path.staged]). If it fails, it leaves
+        nothing behind and raises the error as the plain write would.
         """
         if atomic:
-            with self.staged() as staged:
+            with _staged.AtomicStage(self) as staged:
                 return staged.write_bytes(data)
         return engine.invoke(self, BY_NAME["write_bytes"], (data,))
 
@@ -212,7 +214,7 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            with self.staged() as staged:
+            with _staged.AtomicStage(self) as staged:
                 return staged.write_text(
                     data, encoding=encoding, errors=errors, newline=newline
                 )
@@ -274,7 +276,20 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
           is uploaded file by file, and readers can see a mixture meanwhile.
         - If committing fails, this path is left as it was (or restored), the
           staged data is kept, and [`CommitError`][bagof.paths.CommitError]
-          says where.
+          says where. To drop it instead, keep the stage and discard it:
+
+          ```python
+          stage = target.staged()
+          try:
+              with stage as tmp:
+                  build(tmp)
+          except CommitError:
+              stage.discard()
+              raise
+          ```
+
+          The `atomic=True` writers always drop it, and raise the error
+          itself: their caller still holds the data.
 
         The staging area is a hidden directory beside this path (beside the
         file a symbolic link names), so the move stays on one file system; a

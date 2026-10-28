@@ -320,6 +320,10 @@ async def _acommit_remote(entry: str, target: tx.Any) -> None:
 class _StageBase:
     """What a synchronous and an asynchronous staging area share."""
 
+    # The stage behind `atomic=True`: a failure leaves nothing behind and
+    # raises the error itself, since the caller has no stage to commit again.
+    _atomic: tx.ClassVar[bool] = False
+
     def __init__(self, target: tx.Any, copy: bool) -> None:
         self._target = target
         self._copy = copy
@@ -432,6 +436,9 @@ class Stage(_StageBase):
             else:
                 _commit_remote(self._entry, self._target)
         except Exception as error:
+            if self._atomic:
+                self.discard()
+                raise
             raise self._failed(error) from error
         self._state = _COMMITTED
         self._cleanup()
@@ -532,6 +539,9 @@ class AsyncStage(_StageBase):
                     _commit_remote, self._entry, self._target._sync()
                 )
         except Exception as error:
+            if self._atomic:
+                await self.discard()
+                raise
             raise self._failed(error) from error
         self._state = _COMMITTED
         await bridge.run(self._cleanup)
@@ -557,6 +567,23 @@ class AsyncStage(_StageBase):
 
 
 # -- atomic writes ----------------------------------------------------------
+# `atomic=True` on `write_bytes`, `write_text` and `open` is the plain write,
+# made atomic: where the staging area would show, it acts as the plain write
+# does. A failure, before or during the commit, leaves nothing behind and
+# raises the error itself. A `staged()` caller keeps its data on a failed
+# commit, in `CommitError`.
+class AtomicStage(Stage):
+    """The staging area behind `atomic=True`."""
+
+    _atomic = True
+
+
+class AsyncAtomicStage(AsyncStage):
+    """The async staging area behind `atomic=True`."""
+
+    _atomic = True
+
+
 def check_atomic_mode(mode: str) -> bool:
     """Whether an atomic `open` must start from a copy of the target.
 
