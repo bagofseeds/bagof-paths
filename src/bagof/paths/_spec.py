@@ -38,6 +38,10 @@ class Member(tx.NamedTuple):
     # A status check (exists, is_file, ...): on a local path it answers False
     # rather than raise an OSError or ValueError, as Python 3.14 does.
     check: bool = False
+    # Name of a synthesis function used when the driver *has* the member but
+    # its method does not take a keyword the call forwards (pathlib gained
+    # `follow_symlinks` on is_file/is_dir in 3.13); gated by `needs`.
+    keyword_fallback: tx.Optional[str] = None
 
 
 # The pure-path surface: lexical members that every driver either implements
@@ -94,9 +98,21 @@ PURE_PATH_MEMBERS = (
 IO_MEMBERS = (
     # status queries -- follow_symlinks is forwarded only when False, so a
     # driver whose signature predates the keyword still works by default.
-    Member("exists", IO, normalize=(("follow_symlinks", True),), check=True),
-    Member("is_file", IO, normalize=(("follow_symlinks", True),), check=True),
-    Member("is_dir", IO, normalize=(("follow_symlinks", True),), check=True),
+    # follow_symlinks=False on a driver whose method lacks the keyword (an
+    # older pathlib: exists < 3.12, is_file/is_dir < 3.13) is answered from
+    # lstat(), as the newest pathlib does.
+    Member(
+        "exists", IO, normalize=(("follow_symlinks", True),), check=True,
+        keyword_fallback="exists_no_follow", needs=("lstat",),
+    ),
+    Member(
+        "is_file", IO, normalize=(("follow_symlinks", True),), check=True,
+        keyword_fallback="is_file_no_follow", needs=("lstat",),
+    ),
+    Member(
+        "is_dir", IO, normalize=(("follow_symlinks", True),), check=True,
+        keyword_fallback="is_dir_no_follow", needs=("lstat",),
+    ),
     Member("is_symlink", IO, check=True),
     Member("stat", IO, normalize=(("follow_symlinks", True),)),
     Member("lstat", IO),

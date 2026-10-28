@@ -32,11 +32,12 @@ from ._base import BaseWrapper
 from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
 from ._detect import is_async_driver as _is_async_driver
 from ._errors import UnsupportedPathOperation
+from ._fallbacks import MISSING_ERRORS, mode_status
 from ._local_copy import LocalCopyMixin
 from ._path import Path
 from ._protocols import merged_storage_options
 from ._purepath import PurePathMixin
-from ._spec import BY_NAME
+from ._spec import BY_NAME, Member
 
 _WALK_DONE = object()
 
@@ -307,18 +308,41 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
                 member = BY_NAME[name]
                 call_kwargs = engine._drop_defaults(kwargs, member.normalize)
                 call_args = engine.coerce_args(member, args)
-                try:
-                    result = method(*call_args, **call_kwargs)
-                    if inspect.isawaitable(result):
-                        result = await result
-                except (OSError, ValueError):
-                    if not engine.quiet_check(self, member):
-                        raise
-                    return False
-                return engine._finish(self, result, member.result)
+                if member.keyword_fallback and not engine.accepts(
+                    self._wrapped, name, call_kwargs
+                ):
+                    # The method lacks a keyword (anyio.Path mirrors the
+                    # running pathlib): answer from the driver's own lstat,
+                    # else the local view below synthesizes or raises.
+                    if callable(getattr(self._wrapped, "lstat", None)):
+                        return await self._no_follow(member)
+                else:
+                    try:
+                        result = method(*call_args, **call_kwargs)
+                        if inspect.isawaitable(result):
+                            result = await result
+                    except (OSError, ValueError):
+                        if not engine.quiet_check(self, member):
+                            raise
+                        return False
+                    return engine._finish(self, result, member.result)
         # Sync driver, or a native driver that lacks this member.
         result = await bridge.run(getattr(self._sync(), name), *args, **kwargs)
         return self._wrap(result)
+
+    async def _no_follow(self, member: Member) -> bool:
+        """A status check with `follow_symlinks=False`, from `lstat()`."""
+        try:
+            result = self._wrapped.lstat()
+            if inspect.isawaitable(result):
+                result = await result
+        except MISSING_ERRORS:
+            return False
+        except (OSError, ValueError):
+            if not engine.quiet_check(self, member):
+                raise
+            return False
+        return mode_status(member.name, result.st_mode)
 
     async def _aiter(
         self,
@@ -361,6 +385,9 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         not search. To see the error, call `stat()`, which still raises.
         The other status checks (`is_file`, `is_dir`, `is_symlink`, ...)
         do the same.
+
+        `follow_symlinks=False` (also on `is_file` and `is_dir`) asks about
+        a symbolic link itself, on every Python version.
 
         ```pycon
         >>> import asyncio

@@ -17,6 +17,7 @@ import io
 import ntpath
 import os
 import pathlib
+import stat
 
 import typing_extensions as tx
 
@@ -200,7 +201,38 @@ def link_to(wrapper: tx.Any, target: tx.Any) -> None:
     wrapper.with_wrapped(driver_target).hardlink_to(wrapper._wrapped)
 
 
-# name -> synthesis function, resolved by the engine from a Member.fallback.
+# A missing path (or a parent that is not a directory) is not there: the
+# no-follow checks answer False for it on any driver. Other errors propagate,
+# and a local path then reads them as False as every status check does.
+MISSING_ERRORS = (FileNotFoundError, NotADirectoryError)
+
+
+def mode_status(name: str, mode: int) -> bool:
+    """Answer `exists`/`is_file`/`is_dir` from an `lstat()` mode."""
+    if name == "is_file":
+        return stat.S_ISREG(mode)
+    if name == "is_dir":
+        return stat.S_ISDIR(mode)
+    return True
+
+
+def _no_follow(name: str) -> tx.Callable[..., bool]:
+    """`name(follow_symlinks=False)` from `lstat`, for a driver whose
+    method does not take the keyword (pathlib before 3.12/3.13)."""
+
+    def synth(wrapper: tx.Any, follow_symlinks: bool = False) -> bool:
+        try:
+            mode = wrapper.lstat().st_mode
+        except MISSING_ERRORS:
+            return False
+        return mode_status(name, mode)
+
+    synth.__name__ = synth.__qualname__ = f"{name}_no_follow"
+    return synth
+
+
+# name -> synthesis function, resolved by the engine from a Member.fallback
+# (or Member.keyword_fallback).
 FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
     "read_bytes": read_bytes,
     "read_text": read_text,
@@ -214,4 +246,7 @@ FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
     "is_reserved": is_reserved,
     "link_to": link_to,
     "as_url": as_url,
+    "exists_no_follow": _no_follow("exists"),
+    "is_file_no_follow": _no_follow("is_file"),
+    "is_dir_no_follow": _no_follow("is_dir"),
 }

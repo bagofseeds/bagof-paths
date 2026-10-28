@@ -10,11 +10,11 @@ import asyncio
 import errno
 import os
 import pathlib
-import sys
 
 import pytest
+import typing_extensions as tx
 
-from bagof.paths import AsyncPath, Path
+from bagof.paths import AsyncPath, Path, UnsupportedPathOperation
 
 CHECKS = (
     "exists", "is_file", "is_dir", "is_symlink", "is_mount", "is_socket",
@@ -64,13 +64,14 @@ def test_too_long_stat_raises(tmp_path: pathlib.Path) -> None:
         _run(AsyncPath(_too_long(tmp_path)).stat())
 
 
-@pytest.mark.skipif(
-    sys.version_info < (3, 12), reason="follow_symlinks is 3.12+ pathlib"
-)
+# follow_symlinks reached pathlib's exists in 3.12 and is_file/is_dir in 3.13;
+# before that the wrapper answers from lstat(), so this runs everywhere.
 @pytest.mark.parametrize("name", SIMPLE)
 def test_too_long_no_follow(tmp_path: pathlib.Path, name: str) -> None:
     p = Path(_too_long(tmp_path))
     assert getattr(p, name)(follow_symlinks=False) is False
+    a = AsyncPath(_too_long(tmp_path))
+    assert _run(getattr(a, name)(follow_symlinks=False)) is False
 
 
 # -- a parent that may not be searched --------------------------------------
@@ -173,3 +174,267 @@ def test_remote_errors_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
         p.exists()
     with pytest.raises(OSError):
         _run(AsyncPath("memory://bagofpaths-status/a.txt").exists())
+
+
+# -- follow_symlinks=False where the driver lacks the keyword ---------------
+# pathlib gained the keyword on exists in 3.12 and on is_file/is_dir in
+# 3.13. The wrapper answers it as the newest pathlib does on every version:
+# from lstat() when the driver's method does not take it.
+@pytest.fixture
+def tree(tmp_path: pathlib.Path) -> pathlib.Path:
+    (tmp_path / "f.txt").write_text("x")
+    (tmp_path / "d").mkdir()
+    try:
+        (tmp_path / "lf").symlink_to(tmp_path / "f.txt")
+        (tmp_path / "ld").symlink_to(tmp_path / "d", True)
+        (tmp_path / "dangling").symlink_to(tmp_path / "missing")
+    except (OSError, NotImplementedError):
+        pass  # no symlinks here; those cases are skipped
+    return tmp_path
+
+
+# name -> (exists, is_file, is_dir), all with follow_symlinks=False
+NO_FOLLOW = {
+    "f.txt": (True, True, False),
+    "d": (True, False, True),
+    "lf": (True, False, False),
+    "ld": (True, False, False),
+    "dangling": (True, False, False),
+    "missing": (False, False, False),
+    "f.txt/below": (False, False, False),
+}
+
+
+def _cases(
+    tree: pathlib.Path,
+) -> tx.Iterator[tx.Tuple[str, tx.Tuple[bool, ...]]]:
+    for name, expected in NO_FOLLOW.items():
+        link = name in ("lf", "ld", "dangling")
+        if link and not (tree / name).is_symlink():
+            continue
+        yield str(tree / name), expected
+
+
+class _OldPathlib(type(pathlib.Path())):  # type: ignore[misc]
+    """A local stdlib driver whose checks predate follow_symlinks."""
+
+    def exists(self) -> bool:  # type: ignore[override]
+        return os.path.exists(str(self))
+
+    def is_file(self) -> bool:  # type: ignore[override]
+        return os.path.isfile(str(self))
+
+    def is_dir(self) -> bool:  # type: ignore[override]
+        return os.path.isdir(str(self))
+
+
+class _NoLstat(os.PathLike):
+    """A local driver with old-style checks and no lstat to fall back on."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __fspath__(self) -> str:
+        return self._text
+
+    def __str__(self) -> str:
+        return self._text
+
+    def exists(self) -> bool:
+        return os.path.exists(self._text)
+
+    def is_file(self) -> bool:
+        return os.path.isfile(self._text)
+
+    def is_dir(self) -> bool:
+        return os.path.isdir(self._text)
+
+
+class _OldAsyncNoLstat(os.PathLike):
+    """A natively-async local driver whose checks predate the keyword and
+    which has no lstat: the local stdlib view answers instead."""
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+
+    def __fspath__(self) -> str:
+        return self._text
+
+    def __str__(self) -> str:
+        return self._text
+
+    async def exists(self) -> bool:
+        return os.path.exists(self._text)
+
+    async def is_file(self) -> bool:
+        return os.path.isfile(self._text)
+
+    async def is_dir(self) -> bool:
+        return os.path.isdir(self._text)
+
+
+class _OldAsync(_OldAsyncNoLstat):
+    """The same, with the driver's own lstat to answer from."""
+
+    async def lstat(self) -> os.stat_result:
+        return os.lstat(self._text)
+
+
+def _answers(p: tx.Any) -> tx.Tuple[bool, ...]:
+    return tuple(getattr(p, name)(follow_symlinks=False) for name in SIMPLE)
+
+
+async def _gather(p: tx.Any) -> tx.Tuple[bool, ...]:
+    return tuple([await getattr(p, n)(follow_symlinks=False) for n in SIMPLE])
+
+
+def _answers_async(p: tx.Any) -> tx.Tuple[bool, ...]:
+    return _run(_gather(p))  # type: ignore[return-value]
+
+
+def test_no_follow_real_pathlib(tree: pathlib.Path) -> None:
+    for text, expected in _cases(tree):
+        assert _answers(Path(text)) == expected, text
+        assert _answers_async(AsyncPath(text)) == expected, text
+
+
+def test_no_follow_fallback(tree: pathlib.Path) -> None:
+    for text, expected in _cases(tree):
+        assert _answers(Path(_OldPathlib(text))) == expected, text
+        assert _answers_async(AsyncPath(_OldPathlib(text))) == expected, text
+
+
+def test_no_follow_fallback_default_is_native(tree: pathlib.Path) -> None:
+    p = Path(_OldPathlib(str(tree / "f.txt")))
+    assert (p.exists(), p.is_file(), p.is_dir()) == (True, True, False)
+
+
+def test_no_follow_fallback_too_long(tmp_path: pathlib.Path) -> None:
+    long = _too_long(tmp_path)
+    assert _answers(Path(_OldPathlib(long))) == (False, False, False)
+    assert _answers_async(AsyncPath(_OldPathlib(long))) == (False,) * 3
+
+
+def test_no_follow_fallback_needs_lstat(tmp_path: pathlib.Path) -> None:
+    p = Path(_NoLstat(str(tmp_path)))
+    assert p.is_dir() is True  # the default needs no fallback
+    for name in SIMPLE:
+        with pytest.raises(UnsupportedPathOperation) as info:
+            getattr(p, name)(follow_symlinks=False)
+        assert f"{name}(follow_symlinks=False)" in str(info.value)
+        assert "_NoLstat" in str(info.value)
+        with pytest.raises(UnsupportedPathOperation):
+            _run(getattr(AsyncPath(_NoLstat(str(tmp_path))), name)(
+                follow_symlinks=False
+            ))
+
+
+def test_no_follow_native_async(tree: pathlib.Path) -> None:
+    for text, expected in _cases(tree):
+        assert _answers_async(AsyncPath(_OldAsync(text))) == expected, text
+        p = AsyncPath(_OldAsyncNoLstat(text))
+        assert _answers_async(p) == expected, text
+    long = AsyncPath(_OldAsync(_too_long(tree)))
+    assert _answers_async(long) == (False, False, False)
+
+
+def test_no_follow_anyio(tree: pathlib.Path) -> None:
+    anyio = pytest.importorskip("anyio")
+    for text, expected in _cases(tree):
+        assert _answers_async(AsyncPath(anyio.Path(text))) == expected, text
+
+
+def test_no_follow_keeps_a_real_type_error(tmp_path: pathlib.Path) -> None:
+    # The keyword is read from the signature, so a TypeError raised inside
+    # a driver that takes it is not mistaken for a missing keyword.
+    class Broken(type(pathlib.Path())):  # type: ignore[misc]
+        def is_file(self, *, follow_symlinks: bool = True) -> bool:
+            raise TypeError("inside the driver")
+
+    with pytest.raises(TypeError, match="inside the driver"):
+        Path(Broken(str(tmp_path))).is_file(follow_symlinks=False)
+
+
+def test_no_follow_signature_tracks_the_method(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    p = Path(_OldPathlib(str(tmp_path)))
+    assert p.is_dir(follow_symlinks=False) is True
+    # A method that gains the keyword is called with it, not the fallback.
+    monkeypatch.setattr(
+        _OldPathlib, "is_dir", lambda self, follow_symlinks=True: "native"
+    )
+    assert p.is_dir(follow_symlinks=False) == "native"
+
+
+class _OldAsyncRemote:
+    """A natively-async remote driver whose checks predate the keyword and
+    whose lstat fails: a remote error is never turned into False."""
+
+    protocol = "memory"
+    path = "/b/x"
+
+    def __str__(self) -> str:
+        return "memory://b/x"
+
+    async def exists(self) -> bool:
+        return True
+
+    async def is_file(self) -> bool:
+        return True
+
+    async def is_dir(self) -> bool:
+        return False
+
+    async def lstat(self) -> os.stat_result:
+        raise PermissionError(errno.EACCES, "denied")
+
+
+def test_no_follow_native_async_remote_error_propagates() -> None:
+    p = AsyncPath(_OldAsyncRemote())
+    for name in SIMPLE:
+        with pytest.raises(PermissionError):
+            _run(getattr(p, name)(follow_symlinks=False))
+
+
+class _NoSignature:
+    """A callable whose signature cannot be read."""
+
+    __signature__ = "not a signature"
+
+    def __call__(self, *args: tx.Any, **kwargs: tx.Any) -> bool:
+        return True
+
+
+class _Unhashable:
+    """A callable class attribute that cannot be a cache key."""
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __call__(self, *, follow_symlinks: bool = True) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    "method, expected",
+    [
+        (lambda **kwargs: True, True),  # **kwargs takes any keyword
+        (_NoSignature(), True),  # unreadable signature: the call decides
+        (lambda: True, False),
+    ],
+    ids=["var-keyword", "no-signature", "no-keyword"],
+)
+def test_accepts_reads_the_signature(method: tx.Any, expected: bool) -> None:
+    from bagof.paths import _engine
+
+    driver = type("_Driver", (), {"is_file": staticmethod(method)})()
+    assert _engine.accepts(
+        driver, "is_file", {"follow_symlinks": False}
+    ) is expected
+
+
+def test_accepts_an_unhashable_class_attribute() -> None:
+    from bagof.paths import _engine
+
+    driver = type("_Driver", (), {"is_file": _Unhashable()})()
+    assert _engine.accepts(driver, "is_file", {"follow_symlinks": False})
