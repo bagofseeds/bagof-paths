@@ -574,6 +574,14 @@ def test_pathlib_copy_to_itself_is_refused(tmp_path: pathlib.Path) -> None:
     assert source.read_text() == "data"
 
 
+def test_vfspath_is_the_path_as_written(tmp_path: pathlib.Path) -> None:
+    # pathlib 3.15 names a copy target by its class's `__vfspath__`; it is
+    # the string form, the URL for a remote path, on every version.
+    local = tmp_path / "a.txt"
+    assert type(Path(local)).__vfspath__(Path(local)) == str(local)
+    assert PurePath("s3://b/x.txt").__vfspath__() == "s3://b/x.txt"
+
+
 @needs_314
 def test_pathlib_moves_to_our_path(tmp_path: pathlib.Path) -> None:
     source = tmp_path / "a.txt"

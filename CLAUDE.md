@@ -323,7 +323,8 @@ codespell src tests docs
 **Run more than one Python before pushing** if you touched anything
 version-sensitive — `pathlib` gained members across versions (`walk` 3.12,
 `copy`/`info` 3.14; `is_junction` 3.12; `hardlink_to` 3.10) and drops others
-(`link_to` removed 3.12). CI covers 3.8 and current, and those ends are where
+(`link_to` removed 3.12); pathlib 3.15 also reads `__vfspath__` from a
+`copy`/`move` target's class. CI covers 3.8 and current, and those ends are where
 things differ; a member present on one interpreter and synthesized on another
 will only show the gap on the version that lacks it. The coverage job runs a
 single current interpreter, so a fallback that only fires on old Pythons needs
