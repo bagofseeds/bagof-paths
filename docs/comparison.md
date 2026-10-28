@@ -93,6 +93,8 @@ there, on `path.wrapped`.
 
 ## What bagof-paths adds
 
+* **Local or not, in one call.** `is_local()` says whether a path is a file
+  on this machine, the one `os.fspath` accepts, without touching storage.
 * **One error for every library.** When an operation is not possible, you get
   the same `UnsupportedPathOperation`. It names the operation and the library.
 * **Safe defaults.** Where two libraries disagree in a way that could lose

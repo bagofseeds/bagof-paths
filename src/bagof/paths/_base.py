@@ -372,6 +372,27 @@ class BaseWrapper:
         value = getattr(self._wrapped, "anchor", None)
         return value if isinstance(value, str) else self.drive + self.root
 
+    def is_local(self) -> bool:
+        """Whether the path names a file on the local file system.
+
+        True for a plain path and for a `file://` URL; false for a remote
+        URL. It reads only the path, never storage. A local path is the one
+        `os.fspath` accepts, so it can be handed to a library that opens
+        files by name.
+
+        ```pycon
+        >>> Path("/data/scan.nii").is_local()
+        True
+        >>> Path("file:///data/scan.nii").is_local()
+        True
+        ```
+
+        ```python
+        Path("s3://bucket/scan.nii").is_local()     # False
+        ```
+        """
+        return self.protocol in LOCAL_PROTOCOLS
+
     # -- driver-specific accessors -----------------------------------------
     # Metadata and handles a particular driver exposes. Each delegates to the
     # wrapped object and raises UnsupportedPathOperation when it is absent, so
@@ -474,7 +495,7 @@ class BaseWrapper:
         return str(self._wrapped)
 
     def __fspath__(self) -> str:
-        if self.protocol in LOCAL_PROTOCOLS:
+        if self.is_local():
             return os.fspath(self._wrapped)
         raise UnsupportedPathOperation(
             "__fspath__",

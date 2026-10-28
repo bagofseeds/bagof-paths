@@ -65,6 +65,17 @@ load("/data/train.bin")
 load("s3://my-bucket/train.bin")
 ```
 
+Some libraries open files only by name. `is_local()` tells you whether a path
+is a local file you can hand to them; it reads only the path, never storage.
+
+```pycon
+>>> from bagof.paths import Path
+>>> Path("/data/scan.nii").is_local()
+True
+>>> Path("file:///data/scan.nii").is_local()
+True
+```
+
 ## Credentials
 
 Pass connection details with `storage_options`. They go straight to the
