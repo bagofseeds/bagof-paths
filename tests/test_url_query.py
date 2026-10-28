@@ -273,3 +273,125 @@ def test_upath_derived_path_keeps_storage_options() -> None:
     assert p.name == "k.txt"
     assert p.parent.storage_options["anon"] == 1
     assert (p.parent / "y").storage_options["anon"] == 1
+
+
+# -- without_query: the URL read as a URL, whatever the store --------------
+@pytest.mark.parametrize("cls", FRONTS)
+@pytest.mark.parametrize(
+    "url, bare, name",
+    [
+        ("s3://b/dir/store.zarr?version=2", "s3://b/dir/store.zarr",
+         "store.zarr"),
+        ("s3://b/dir/x?sig=a/b.zip", "s3://b/dir/x", "x"),
+        ("s3://b/dir/x.nii.gz?versionId=abc", "s3://b/dir/x.nii.gz",
+         "x.nii.gz"),
+        ("gs://b/dir/x.nii.gz#part", "gs://b/dir/x.nii.gz", "x.nii.gz"),
+        ("memory://dir/x.nii.gz?q=1#f", "memory://dir/x.nii.gz", "x.nii.gz"),
+        ("https://h/dir/x.nii.gz?token=1#f", "https://h/dir/x.nii.gz",
+         "x.nii.gz"),
+    ],
+)
+def test_without_query(cls: type, url: str, bare: str, name: str) -> None:
+    p = cls(url)
+    q = p.without_query()
+    assert type(q) is cls
+    assert str(q) == bare
+    assert q.name == name
+    assert q.without_query() == q
+    assert str(p) == url  # the original is untouched
+
+
+@pytest.mark.parametrize("cls", FRONTS)
+def test_without_query_leaves_a_plain_url_and_a_local_path(cls: type) -> None:
+    p = cls("s3://b/dir/x.txt")
+    assert p.without_query() == p
+    local = cls("/tmp/x?.nii")
+    assert local.without_query() is local
+    assert local.without_query().name == "x?.nii"
+
+
+def test_without_query_is_listed_as_supported() -> None:
+    p = PurePath("s3://b/k?v=1")
+    assert p.supports("without_query")
+    assert "without_query" in p.capabilities()
+
+
+def test_without_query_keeps_storage_options() -> None:
+    pytest.importorskip("upath")
+    p = Path("s3://b/dir/k.txt?x=1", storage_options={"anon": 1})
+    assert p.without_query().storage_options["anon"] == 1
+
+
+def test_without_query_refuses_a_driver_it_cannot_rebuild() -> None:
+    from bagof.paths import UnsupportedPathOperation
+
+    with pytest.raises(UnsupportedPathOperation, match="without_query"):
+        Path(_NoSegments()).without_query()
+
+
+def test_without_query_carries_subclass_state() -> None:
+    class Tagged(PurePath):
+        pass
+
+    p = Tagged("https://h/x?t=1")
+    p.tag = "kept"
+    assert p.without_query().tag == "kept"
+
+
+# -- file: and local: URLs -------------------------------------------------
+# A file URI is a URL (RFC 8089): pathlib reads it so from Python 3.14 on,
+# and the wrapper does on every version. A "?" or "#" in a file name is
+# written %3F / %23, as as_uri() writes it.
+@pytest.mark.parametrize(
+    "uri, path",
+    [
+        ("file:///tmp/x?.nii", "/tmp/x"),
+        ("file:///tmp/x.nii?q=1#f", "/tmp/x.nii"),
+        ("file:///tmp/x%3F.nii", "/tmp/x?.nii"),
+        ("file:///tmp/x%23.nii", "/tmp/x#.nii"),
+        ("file://localhost/tmp/x", "/tmp/x"),
+        ("FILE:///tmp/x", "/tmp/x"),
+        ("file:///tmp/a%20b", "/tmp/a b"),
+        ("file:////tmp/x", "//tmp/x"),
+    ],
+)
+def test_file_uri_is_read_as_a_url(uri: str, path: str) -> None:
+    import os
+
+    if os.name == "nt":  # pragma: no cover - POSIX spellings
+        pytest.skip("POSIX paths")
+    assert str(Path(uri)) == path
+    assert str(Path.from_uri(uri)) == path
+    assert str(PurePath(uri)) == path
+
+
+def test_file_uri_round_trips_a_name_with_question_mark_and_hash(
+    tmp_path: object,
+) -> None:
+    import pathlib
+
+    local = pathlib.Path(str(tmp_path)) / "x?#%.nii"
+    assert Path(local.as_uri()) == Path(local)
+    assert Path.from_uri(local.as_uri()).name == "x?#%.nii"
+
+
+@pytest.mark.parametrize("uri", ["file://elsewhere/share/x", "file:rel"])
+def test_file_uri_that_is_not_a_local_absolute_path_is_refused(
+    uri: str,
+) -> None:
+    import os
+
+    if os.name == "nt" and "elsewhere" in uri:  # pragma: no cover
+        pytest.skip("a UNC path on Windows")
+    with pytest.raises(ValueError):
+        Path.from_uri(uri)
+    if "://" in uri:
+        with pytest.raises(ValueError):
+            Path(uri)
+
+
+def test_local_url_keeps_question_mark_and_hash() -> None:
+    # local:// is fsspec's name for the local filesystem, which reads what
+    # follows the scheme literally.
+    assert str(Path("local:///tmp/x?.nii")) == "/tmp/x?.nii"
+    assert Path("local:///tmp/x#1").name == "x#1"

@@ -99,7 +99,10 @@ name would collide.
   not cloudpathlib, which keeps it in the key). Everywhere else `?`/`#` are
   key characters. The lexical members run on `BaseWrapper._query_free()`,
   the driver rebuilt via its own `with_segments`; the string, `.path`,
-  identity and I/O keep it; a derived path drops it.
+  identity and I/O keep it; a derived path drops it. `without_query()` is the
+  explicit escape hatch: RFC 3986 on any remote scheme. `file:` URIs follow
+  Python 3.14's `from_uri` on every version (`_local_from_file_uri`), never
+  the running pathlib.
 - **`_drivers.py` absorbs the operations backends genuinely disagree on** —
   `rmdir` recursion, native `copy`/`move`, `walk` — behind adapters selected
   by driver type. A `GenericAdapter` duck-types any driver; named subclasses

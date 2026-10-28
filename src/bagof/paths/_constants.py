@@ -31,8 +31,9 @@ ADAPTER_MEMBERS = frozenset(
     {"rmdir", "copy", "copy_into", "move", "move_into", "walk"}
 )
 
-# Members computed lexically (see _match.py), delegated to neither.
-COMPUTED_MEMBERS = frozenset({"match", "full_match"})
+# Members computed by the wrapper itself, delegated to no driver: matching (see
+# _match.py) and without_query (which reads any remote URL as a URL).
+COMPUTED_MEMBERS = frozenset({"match", "full_match", "without_query"})
 
 # Driver-specific accessor properties on the base wrapper: present only when
 # the wrapped driver exposes the attribute (see BaseWrapper). Listed here so

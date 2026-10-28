@@ -416,6 +416,31 @@ registry.
   view is rebuilt through the driver's own `with_segments`, so its
   configuration rides along; a driver without one keeps its own answer.
 
+  For a caller who wants the URL read as a URL whatever the store -- to name
+  an output after it, say -- `without_query()` returns the path with
+  everything from the first `?` or `#` removed, on any remote scheme. It is
+  one method returning a path rather than a parallel `url_name`/`url_suffix`
+  family, so every lexical member composes on it. No path library has a
+  query API (pathlib, UPath and cloudpathlib offer only `with_name`/
+  `with_stem`/`with_suffix`/`with_segments`); the URL libraries do (yarl
+  `with_query(None)`/`with_fragment(None)`/`without_query_params`, httpx
+  `copy_with(query=None)`, furl `remove(query=...)`). A `with_query` setter
+  and a `query` getter are deliberately not offered: outside `http`, what
+  "the query" of a store key would be is exactly what the backends disagree
+  on.
+
+  **File URIs [settled].** A `file:` URI is a URL (RFC 8089): Python 3.14's
+  `Path.from_uri` (`url2pathname(require_scheme=True)`, "Discard query and
+  fragment") reads `file:///tmp/x?.nii` as `/tmp/x`, and `as_uri()` writes a
+  `?` in a name as `%3F`; 3.13's `from_uri`, universal-pathlib and fsspec
+  read it literally. The wrapper follows 3.14 on every version -- one
+  implementation for `Path(url)`, `Path.from_uri` and `PurePath`, checked
+  against 3.14's `from_uri` -- since delegating to the running pathlib made
+  the answer version-dependent. That also refuses a non-local authority
+  (`file://host/share/x`), which was silently read as `/share/x`.
+  `local://` is fsspec's name for the local filesystem, so it follows fsspec
+  and reads what follows the scheme literally.
+
   Measuring this also showed the native async driver building its filesystem
   without fsspec's `_get_kwargs_from_urls`, so `AsyncPath("s3://...?versionId=v")`
   read the *latest* version where `Path` read `v`; it now merges those options

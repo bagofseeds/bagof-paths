@@ -106,7 +106,8 @@ there, on `path.wrapped`.
   `https://host`. So is an object version in a cloud URL, such as
   `s3://bucket/x.nii.gz?versionId=...`. The path itself keeps both, so a
   read still sends the token or fetches that version. In a cloud key, any
-  other `?` or `#` is part of the name, as it is for the store.
+  other `?` or `#` is part of the name, as it is for the store;
+  `without_query()` drops it anyway when you want the URL read as a URL.
 * **An `await` version.** `AsyncPath` gives you the same methods as coroutines.
   It runs a blocking library in a background thread, so your event loop keeps
   moving.

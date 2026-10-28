@@ -163,6 +163,18 @@ PurePath('https://example.org/data')
 'https://example.org/data/brain.nii.gz?token=abc'
 ```
 
+In other cloud stores a `?` can be part of an object's real name, so `name`
+keeps it. To read any URL as a URL, for example to name an output file, use
+`without_query()`:
+
+```pycon
+>>> key = PurePath("s3://bucket/data/store.zarr?version=2")
+>>> key.name
+'store.zarr?version=2'
+>>> key.without_query().name
+'store.zarr'
+```
+
 A `PurePath` and a `Path` to the same place compare equal and hash alike, so
 either one looks the other up in a set or a dictionary. This mirrors
 `pathlib`, where a `PurePath` equals the `Path` beside it.
