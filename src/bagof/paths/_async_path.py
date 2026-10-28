@@ -565,7 +565,9 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- staged writes -----------------------------------------------------
     @_awaitable
-    def staged(self, *, copy: bool = False) -> _staged.AsyncStage:
+    def staged(
+        self, *, copy: bool = False, replace_type: bool = True
+    ) -> _staged.AsyncStage:
         """A staging area for a new version of this path.
 
         The same as [`Path.staged`][bagof.paths.Path.staged], used with
@@ -579,7 +581,9 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         Outside an `async with` block, `await` it to make the staging
         area, then `await` its `commit()` or `discard()`.
         """
-        return _staged.AsyncStage(self, copy=copy)
+        return _staged.AsyncStage(
+            self, copy=copy, replace_type=replace_type
+        )
 
     # -- directory iteration -----------------------------------------------
     async def iterdir(self) -> tx.AsyncIterator[tx.Self]:

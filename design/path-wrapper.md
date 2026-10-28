@@ -568,15 +568,23 @@ registry.
   the target as it was (or restored) and keeps the staged data, past garbage
   collection, in `CommitError(OSError)`; a dropped stage is cleaned by a
   finalizer. `copy=True` starts the staged entry as a copy (a download, for
-  a remote target) for read-modify-write jobs. `atomic=` on `write_bytes`,
-  `write_text` and `open` is built on it (`open` needs a writing mode;
-  `a`/`r+` start from a copy), and is **the plain write, made atomic**:
-  wherever the staging area would otherwise show, it acts as `pathlib`
-  does. A failure, a failed commit included, removes the staging directory
-  and raises the error itself, not `CommitError` (#46): the caller still
-  holds its data and has no stage to commit again. `staged()` keeps its
-  data, since its caller may have built something costly; a caller that
-  wants it dropped keeps the `Stage` and `discard()`s it on `CommitError`.
+  a remote target) for read-modify-write jobs. `replace_type=False` refuses
+  a change between file and directory (`CommitError` with `EISDIR` or
+  `ENOTDIR`); the check sits in the commit, just before the old entry is
+  touched, since a directory can appear after any earlier check.
+
+  `atomic=` on `write_bytes`, `write_text` and `open` is built on it (`open`
+  needs a writing mode; `a`/`r+` start from a copy), and is **the plain
+  write, made atomic**: wherever the staging area would otherwise show, it
+  acts as `pathlib` does. It refuses a directory at the target
+  (`IsADirectoryError`, before staging and again at commit), never
+  replacing it (#45). A failure, a failed commit included, removes the
+  staging directory and raises the error itself, not `CommitError` (#46):
+  the caller still holds its data and has no stage to commit again.
+  `staged()` keeps its defaults: a change of type is a new version, and the
+  data is kept, since its caller may have built something costly; a caller
+  that wants it dropped keeps the `Stage` and `discard()`s it on
+  `CommitError`.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has
