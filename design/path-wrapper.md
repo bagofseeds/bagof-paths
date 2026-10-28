@@ -207,6 +207,22 @@ unwrapped before delegation; a returned/constructed target is wrapped in the
 the target was a plain string. (The reference's TODO list asks for exactly
 this; it never implemented it.)
 
+The coercion is written once (`_args.py`, issues #30/#31) and follows
+`pathlib`: a wrapper becomes its driver; a driver object (anything with
+`parts` or `protocol`) is kept, since it carries its own configuration and
+cloudpathlib's `__fspath__` downloads; any other `os.PathLike` is read with
+`os.fspath`; `bytes` (or a `__fspath__` returning bytes) is a `TypeError`,
+never decoded (a URL or key is UTF-8, `os.fsdecode` is not). A `Member` marks
+its path arguments (`paths=True`), so `write_bytes(b"...")` data is untouched.
+On a remote path a URL segment of `joinpath`/`/` counts as absolute, as an
+absolute path does in `pathlib` and as the same URL given as a wrapper
+already did: the join restarts from it, built through the driver's
+`with_segments`; a URL of another scheme is a `ValueError` (universal-pathlib
+refuses to combine protocols too). A local path keeps `pathlib`'s reading,
+where `"s3://b"` is a name. Measured: universal-pathlib appends a URL string
+(`memory://b/memory://b/d`) and `str()`s bytes (`b/b'x'`); cloudpathlib
+appends a URL string too.
+
 **State 3 (raise) gets one exception type.** `bagof.paths.UnsupportedPathOperation`.
 Bases **[settled]**: `pathlib.UnsupportedOperation` where it exists (3.13+,
 itself a `NotImplementedError` subclass), else `NotImplementedError` — so both

@@ -11,6 +11,7 @@ import typing_extensions as tx
 
 from . import _engine as engine
 from . import _match
+from ._args import path_arg
 from ._errors import UnsupportedPathOperation
 from ._spec import BY_NAME
 
@@ -63,10 +64,15 @@ class PurePathMixin:
 
     # -- pure-path methods -------------------------------------------------
     def joinpath(self, *segments: tx.Any) -> tx.Self:
-        """Combine the path with each of the given segments."""
-        return engine.invoke(
-            self._query_free(), BY_NAME["joinpath"], segments
-        )
+        """Combine the path with each of the given segments.
+
+        As in `pathlib`, a segment that names a location of its own starts
+        the path over: an absolute path, and on a remote path a URL.
+        """
+        base, rest = self._join_args(segments)
+        if not rest:
+            return base
+        return engine.invoke(base._query_free(), BY_NAME["joinpath"], rest)
 
     def with_name(self, name: str) -> tx.Self:
         """A new path with the final component changed to `name`."""
@@ -158,24 +164,41 @@ class PurePathMixin:
         )
 
     def match(
-        self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
+        self, pattern: tx.Any, *, case_sensitive: tx.Optional[bool] = None
     ) -> bool:
         """Whether the path matches `pattern`, anchored from the right.
 
         Matching is lexical and consistent across drivers: it runs on the
-        canonical path, not on the wrapped object.
+        canonical path, not on the wrapped object. The pattern is a string
+        or a path object, as in `pathlib`.
         """
         return _match.match(
-            self._query_free().path, pattern, case_sensitive=case_sensitive
+            self._query_free().path, self._pattern(pattern),
+            case_sensitive=case_sensitive,
         )
 
     def full_match(
-        self, pattern: str, *, case_sensitive: tx.Optional[bool] = None
+        self, pattern: tx.Any, *, case_sensitive: tx.Optional[bool] = None
     ) -> bool:
         """Whether the whole path matches `pattern` (`**` spans segments).
 
-        Uses CPython 3.13's glob semantics on every interpreter.
+        Uses CPython 3.13's glob semantics on every interpreter. The pattern
+        is a string or a path object, as in `pathlib`:
+
+        ```pycon
+        >>> import pathlib
+        >>> Path("/data/x.txt").full_match(pathlib.PurePath("**/*.txt"))
+        True
+        ```
         """
         return _match.full_match(
-            self._query_free().path, pattern, case_sensitive=case_sensitive
+            self._query_free().path, self._pattern(pattern),
+            case_sensitive=case_sensitive,
         )
+
+    def _pattern(self, pattern: tx.Any) -> str:
+        """A match pattern as text, read like the path it is matched on."""
+        pattern = path_arg(pattern)
+        if isinstance(pattern, str):
+            return pattern
+        return self.with_wrapped(pattern)._query_free().path

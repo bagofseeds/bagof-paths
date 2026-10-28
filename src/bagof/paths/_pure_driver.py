@@ -34,6 +34,7 @@ from pathlib import PurePosixPath
 
 import typing_extensions as tx
 
+from ._args import is_url, path_text
 from ._constants import SCHEME_RE
 from ._errors import UnsupportedPathOperation
 from ._protocols import canonical_scheme, traits_for
@@ -186,7 +187,23 @@ class PureCloudPath:
 
     # -- lexical methods ---------------------------------------------------
     def joinpath(self, *segments: tx.Any) -> PureCloudPath:
-        return self._derive(self._pure.joinpath(*[str(s) for s in segments]))
+        # A URL segment names a location of its own and restarts the join,
+        # as an absolute path does in pathlib.
+        result = self
+        for segment in segments:
+            text = path_text(segment)
+            if is_url(text):
+                scheme = SCHEME_RE.match(text).group(1).lower()
+                if canonical_scheme(scheme) != canonical_scheme(self._scheme):
+                    raise ValueError(
+                        f"cannot join {text!r} onto a "
+                        f"{self._scheme + '://'!r} path: it names a "
+                        "different scheme"
+                    )
+                result = PureCloudPath.from_url(text, scheme, self._options)
+            else:
+                result = result._derive(result._pure / text)
+        return result
 
     def __truediv__(self, other: tx.Any) -> PureCloudPath:
         return self.joinpath(other)
@@ -200,7 +217,7 @@ class PureCloudPath:
     def with_segments(self, *segments: tx.Any) -> PureCloudPath:
         # As in universal-pathlib, the segments name a location of this
         # scheme: a scheme-less text is read as following `scheme://`.
-        text = "/".join(str(s) for s in segments)
+        text = "/".join(path_text(s) for s in segments)
         if "://" not in text:
             text = f"{self._chain}{self._inner}://{text.lstrip('/')}"
         match = SCHEME_RE.match(text)
@@ -240,7 +257,7 @@ class PureCloudPath:
         if isinstance(other, PureCloudPath):
             self._require_same_scheme(other._scheme)
             return other._locus()
-        text = str(other)
+        text = path_text(other)
         if "://" in text:
             match = SCHEME_RE.match(text)
             scheme = match.group(1).lower() if match else self._scheme

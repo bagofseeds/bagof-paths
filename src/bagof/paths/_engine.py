@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import typing_extensions as tx
 
+from ._args import path_arg
 from ._base import BaseWrapper
 from ._constants import PATH, PATH_ITER, PATH_TUPLE, SCALAR
 from ._errors import UnsupportedPathOperation
@@ -33,6 +34,20 @@ def _raise_unsupported(wrapper: BaseWrapper, name: str) -> tx.NoReturn:
 def _unwrap(value: tx.Any) -> tx.Any:
     """A wrapper passed as an argument is delegated as its wrapped path."""
     return value._wrapped if isinstance(value, BaseWrapper) else value
+
+
+def coerce_args(
+    member: Member, args: tx.Tuple[tx.Any, ...]
+) -> tx.Tuple[tx.Any, ...]:
+    """A member's positional arguments as the driver should receive them.
+
+    Path arguments go through the shared path coercion (`bytes` refused, a
+    plain `os.PathLike` read with `os.fspath`); any other argument (data,
+    a mode, a name) is only unwrapped, so `write_bytes(b"...")` is untouched.
+    """
+    if member.paths:
+        return tuple(path_arg(arg) for arg in args)
+    return tuple(_unwrap(arg) for arg in args)
 
 
 def _drop_defaults(
@@ -110,7 +125,7 @@ def _invoke(
     kwargs: tx.Optional[tx.Mapping[str, tx.Any]],
 ) -> tx.Any:
     kwargs = _drop_defaults(kwargs or {}, member.normalize)
-    args = tuple(_unwrap(arg) for arg in args)
+    args = coerce_args(member, args)
     method = getattr(wrapper._wrapped, member.name, None)
     if callable(method):
         return _finish(wrapper, method(*args, **kwargs), member.result)

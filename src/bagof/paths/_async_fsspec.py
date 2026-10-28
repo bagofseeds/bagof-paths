@@ -46,6 +46,7 @@ from pathlib import PurePosixPath
 
 import typing_extensions as tx
 
+from ._args import is_url, path_text
 from ._errors import UnsupportedPathOperation
 
 # loop -> {(scheme, options-token): AsyncFileSystem}. Weak on the loop so a
@@ -433,7 +434,23 @@ class AsyncFSPath:
         return parents
 
     def joinpath(self, *segments: tx.Any) -> AsyncFSPath:
-        return self._derive(self._pure.joinpath(*[str(s) for s in segments]))
+        # A URL segment, or a path of this driver, names a location of its
+        # own and restarts the join, as an absolute path does in pathlib.
+        result = self
+        for segment in segments:
+            if isinstance(segment, AsyncFSPath):
+                self._check_scheme(segment._scheme)
+                result = segment
+                continue
+            text = path_text(segment)
+            if is_url(text):
+                self._check_scheme(text.split("://", 1)[0])
+                result = AsyncFSPath.from_url(
+                    text, self._scheme, self._options
+                )
+            else:
+                result = result._derive(result._pure / text)
+        return result
 
     def __truediv__(self, other: tx.Any) -> AsyncFSPath:
         return self.joinpath(other)
@@ -453,11 +470,12 @@ class AsyncFSPath:
         # A scheme-ful first segment names an absolute path on this backend
         # (a rename/copy target given as a URL); rebuild it through the same
         # stripping the constructor uses, so its path matches this one's.
-        if segments and "://" in str(segments[0]):
+        texts = [path_text(s) for s in segments]
+        if texts and "://" in texts[0]:
             return AsyncFSPath.from_url(
-                "/".join(str(s) for s in segments), self._scheme, self._options
+                "/".join(texts), self._scheme, self._options
             )
-        return self._derive(PurePosixPath(*[str(s) for s in segments]))
+        return self._derive(PurePosixPath(*texts))
 
     def as_posix(self) -> str:
         if self._anchor:
@@ -477,7 +495,7 @@ class AsyncFSPath:
         """
         if isinstance(other, AsyncFSPath):
             return other._anchor, other._pure
-        text = str(other)
+        text = path_text(other)
         if "://" in text:
             parsed = AsyncFSPath(self._scheme, _strip(self._scheme, text))
             return parsed._anchor, parsed._pure
@@ -741,7 +759,7 @@ class AsyncFSPath:
         if isinstance(target, AsyncFSPath):
             self._check_scheme(target._scheme)
             return target._path
-        text = str(target)
+        text = path_text(target)
         if "://" in text:
             self._check_scheme(text.split("://", 1)[0])
             return _strip(self._scheme, text)
@@ -753,7 +771,7 @@ class AsyncFSPath:
         if isinstance(target_dir, AsyncFSPath):
             self._check_scheme(target_dir._scheme)
             return target_dir._derive(target_dir._pure / self._pure.name)
-        text = str(target_dir)
+        text = path_text(target_dir)
         if "://" in text:
             self._check_scheme(text.split("://", 1)[0])
             base = AsyncFSPath.from_url(text, self._scheme, self._options)

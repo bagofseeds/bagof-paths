@@ -27,6 +27,7 @@ import typing_extensions as tx
 from . import _bridge as bridge
 from . import _engine as engine
 from . import _staged
+from ._args import path_arg
 from ._base import BaseWrapper
 from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
 from ._detect import is_async_driver as _is_async_driver
@@ -305,7 +306,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
             if method is not None:
                 member = BY_NAME[name]
                 call_kwargs = engine._drop_defaults(kwargs, member.normalize)
-                call_args = tuple(engine._unwrap(a) for a in args)
+                call_args = engine.coerce_args(member, args)
                 try:
                     result = method(*call_args, **call_kwargs)
                     if inspect.isawaitable(result):
@@ -332,7 +333,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
             if method is not None:
                 member = BY_NAME[name]
                 call_kwargs = engine._drop_defaults(kwargs, member.normalize)
-                call_args = tuple(engine._unwrap(a) for a in args)
+                call_args = engine.coerce_args(member, args)
                 iterator = method(*call_args, **call_kwargs)
                 if inspect.isawaitable(iterator):
                     iterator = await iterator
@@ -634,7 +635,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """Copy this file or directory to `target`; return the new path."""
         method = self._native_method("copy")
         if method is not None:
-            return self.with_wrapped(await method(engine._unwrap(target)))
+            return self.with_wrapped(await method(path_arg(target)))
         return self._wrap(
             await bridge.run(
                 self._sync().copy, target,
@@ -653,7 +654,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """Copy into `target_dir`, keeping this path's name."""
         method = self._native_method("copy_into")
         if method is not None:
-            return self.with_wrapped(await method(engine._unwrap(target_dir)))
+            return self.with_wrapped(await method(path_arg(target_dir)))
         return self._wrap(
             await bridge.run(
                 self._sync().copy_into, target_dir,
@@ -666,14 +667,14 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """Move this path to `target`; return the new path."""
         method = self._native_method("move")
         if method is not None:
-            return self.with_wrapped(await method(engine._unwrap(target)))
+            return self.with_wrapped(await method(path_arg(target)))
         return self._wrap(await bridge.run(self._sync().move, target))
 
     async def move_into(self, target_dir: tx.Any) -> tx.Self:
         """Move into `target_dir`, keeping this path's name."""
         method = self._native_method("move_into")
         if method is not None:
-            return self.with_wrapped(await method(engine._unwrap(target_dir)))
+            return self.with_wrapped(await method(path_arg(target_dir)))
         return self._wrap(
             await bridge.run(self._sync().move_into, target_dir)
         )
@@ -742,14 +743,14 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """Rename the path to `target` and return the new path."""
         method = self._native_method("rename")
         if method is not None:
-            return self.with_wrapped(await method(engine._unwrap(target)))
+            return self.with_wrapped(await method(path_arg(target)))
         return await self._call("rename", (self._coerce_target(target),))
 
     async def replace(self, target: tx.Any) -> tx.Self:
         """Rename the path to `target`, replacing any existing file."""
         method = self._native_method("replace")
         if method is not None:
-            return self.with_wrapped(await method(engine._unwrap(target)))
+            return self.with_wrapped(await method(path_arg(target)))
         return await self._call("replace", (self._coerce_target(target),))
 
     # -- permissions and ownership -----------------------------------------
