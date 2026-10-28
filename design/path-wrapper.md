@@ -569,14 +569,26 @@ registry.
   `CommitError(OSError)`; with `keep_on_failure=True` it keeps the data,
   past garbage collection, for another `commit()` (#46: cleaning up after
   ourselves is the default, keeping costly work is the opt-in). A dropped
-  stage is cleaned by a finalizer. `copy=True` starts the staged entry as a copy (a download, for
-  a remote target) for read-modify-write jobs. `atomic=` on `write_bytes`,
-  `write_text` and `open` is built on it (`open` needs a writing mode;
-  `a`/`r+` start from a copy), and is **the plain write, made atomic**:
-  wherever the staging area would otherwise show, it acts as `pathlib`
-  does. A failure, a failed commit included, removes the staging directory
-  and raises the error itself, not `CommitError` (#46): the caller still
-  holds its data and has no stage to commit again, so it never keeps it.
+  stage is cleaned by a finalizer. `copy=True` starts the staged entry as a
+  copy (a download, for a remote target) for read-modify-write jobs.
+  A change between file and directory is refused by default, as `pathlib`
+  and `os.replace` refuse it (`CommitError` with `EISDIR` or `ENOTDIR`, the
+  target untouched); `replace_type=True` allows it, for a format that
+  changes shape (a zarr store from a zip file to a directory). Refusing is
+  the default because replacing a directory with a file deletes the tree,
+  which must never happen silently (#45). The check sits in the commit, just
+  before the old entry is touched, since a directory can appear after any
+  earlier check.
+
+  `atomic=` on `write_bytes`, `write_text` and `open` is built on it (`open`
+  needs a writing mode; `a`/`r+` start from a copy), and is **the plain
+  write, made atomic**: wherever the staging area would otherwise show, it
+  acts as `pathlib` does. It refuses a directory at the target
+  (`IsADirectoryError`, before staging and again at commit), never
+  replacing it (#45). A failure, a failed commit included, removes the
+  staging directory and raises the error itself, not `CommitError` (#46):
+  the caller still holds its data and has no stage to commit again, so it
+  never keeps it.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has

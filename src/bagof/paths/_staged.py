@@ -67,6 +67,15 @@ def _resolve_local(target: tx.Any) -> tx.Tuple[str, str, str]:
     return real, parent, name
 
 
+def _type_error(new_is_dir: bool, target: tx.Any) -> OSError:
+    """What `pathlib` raises for writing one type of entry over the other."""
+    if new_is_dir:
+        code, cls = errno.ENOTDIR, NotADirectoryError
+    else:
+        code, cls = errno.EISDIR, IsADirectoryError
+    return cls(code, os.strerror(code), str(target))
+
+
 # -- local: copy in, commit out -----------------------------------------------
 def _is_dir(path: str) -> bool:
     return os.path.isdir(path) and not os.path.islink(path)
@@ -108,13 +117,17 @@ def _fsync_dir(path: str) -> None:
         os.close(fd)
 
 
-def _commit_local(entry: str, real: str, staging: str) -> None:
+def _commit_local(
+    entry: str, real: str, staging: str, target: tx.Any, replace_type: bool
+) -> None:
     """Move what exists at `entry` onto the local target `real`."""
     if not os.path.lexists(entry):
         return
     new_is_dir = _is_dir(entry)
     old_exists = os.path.lexists(real)
     old_is_dir = old_exists and _is_dir(real)
+    if not replace_type and old_exists and new_is_dir != old_is_dir:
+        raise _type_error(new_is_dir, target)
     if not new_is_dir and not old_is_dir:
         # A file over a file (or over nothing): one atomic replace.
         if old_exists and os.path.isfile(real):
@@ -225,12 +238,15 @@ def _remote_files(base: tx.Any) -> tx.Set[str]:
     return found
 
 
-def _commit_remote(entry: str, target: tx.Any) -> None:
+def _commit_remote(entry: str, target: tx.Any, replace_type: bool) -> None:
     """Upload what exists at `entry` over the remote target."""
     if not os.path.lexists(entry):
         return
     old = _remote_kind(target)
-    if not _is_dir(entry):
+    new_is_dir = _is_dir(entry)
+    if not replace_type and old == ("file" if new_is_dir else "dir"):
+        raise _type_error(new_is_dir, target)
+    if not new_is_dir:
         if old == "dir":
             target.rmdir(recursive=True)
         _upload_file(entry, target)
@@ -292,11 +308,16 @@ async def _aremote_files(base: tx.Any) -> tx.Set[str]:
     return found
 
 
-async def _acommit_remote(entry: str, target: tx.Any) -> None:
+async def _acommit_remote(
+    entry: str, target: tx.Any, replace_type: bool
+) -> None:
     if not await bridge.run(os.path.lexists, entry):
         return
     old = await _aremote_kind(target)
-    if not await bridge.run(_is_dir, entry):
+    new_is_dir = await bridge.run(_is_dir, entry)
+    if not replace_type and old == ("file" if new_is_dir else "dir"):
+        raise _type_error(new_is_dir, target)
+    if not new_is_dir:
         if old == "dir":
             await target.rmdir(recursive=True)
         # One request: the native driver writes the object whole.
@@ -320,15 +341,21 @@ async def _acommit_remote(entry: str, target: tx.Any) -> None:
 class _StageBase:
     """What a synchronous and an asynchronous staging area share."""
 
-    # The stage behind `atomic=True`: a failure leaves nothing behind and
-    # raises the error itself, since the caller has no stage to commit again.
+    # The stage behind `atomic=True`: it writes a file, so it refuses a
+    # directory at the target; a failure leaves nothing behind and raises the
+    # error itself, since the caller has no stage to commit again.
     _atomic: tx.ClassVar[bool] = False
 
     def __init__(
-        self, target: tx.Any, copy: bool, keep_on_failure: bool
+        self,
+        target: tx.Any,
+        copy: bool,
+        replace_type: bool,
+        keep_on_failure: bool,
     ) -> None:
         self._target = target
         self._copy = copy
+        self._replace_type = replace_type and not self._atomic
         self._keep_on_failure = keep_on_failure and not self._atomic
         self._state = _OPEN
         self._dir: tx.Optional[str] = None
@@ -349,6 +376,10 @@ class _StageBase:
                 raise FileNotFoundError(
                     code, os.strerror(code), str(self._target)
                 )
+            if self._atomic and _is_dir(self._real):
+                # Fail before the write, as pathlib does; the commit checks
+                # again, since a directory can appear meanwhile.
+                raise _type_error(False, self._target)
         else:
             parent, name = None, self._target.name
         if not name:
@@ -403,9 +434,10 @@ class Stage(_StageBase):
         target: tx.Any,
         *,
         copy: bool = False,
+        replace_type: bool = False,
         keep_on_failure: bool = False,
     ) -> None:
-        super().__init__(target, copy, keep_on_failure)
+        super().__init__(target, copy, replace_type, keep_on_failure)
         self._create()
         if copy:
             try:
@@ -443,9 +475,12 @@ class Stage(_StageBase):
         self._check_open()
         try:
             if self._local:
-                _commit_local(self._entry, self._real, self._dir)
+                _commit_local(
+                    self._entry, self._real, self._dir, self._target,
+                    self._replace_type,
+                )
             else:
-                _commit_remote(self._entry, self._target)
+                _commit_remote(self._entry, self._target, self._replace_type)
         except Exception as error:
             if self._keep_on_failure:
                 raise self._failed(error) from error
@@ -490,9 +525,10 @@ class AsyncStage(_StageBase):
         target: tx.Any,
         *,
         copy: bool = False,
+        replace_type: bool = False,
         keep_on_failure: bool = False,
     ) -> None:
-        super().__init__(target, copy, keep_on_failure)
+        super().__init__(target, copy, replace_type, keep_on_failure)
         self._prepared = False
 
     async def _prepare(self) -> AsyncStage:
@@ -549,13 +585,17 @@ class AsyncStage(_StageBase):
         try:
             if self._local:
                 await bridge.run(
-                    _commit_local, self._entry, self._real, self._dir
+                    _commit_local, self._entry, self._real, self._dir,
+                    self._target, self._replace_type,
                 )
             elif self._native_remote():
-                await _acommit_remote(self._entry, self._target)
+                await _acommit_remote(
+                    self._entry, self._target, self._replace_type
+                )
             else:
                 await bridge.run(
-                    _commit_remote, self._entry, self._target._sync()
+                    _commit_remote, self._entry, self._target._sync(),
+                    self._replace_type,
                 )
         except Exception as error:
             if self._keep_on_failure:
@@ -590,9 +630,10 @@ class AsyncStage(_StageBase):
 # -- atomic writes ----------------------------------------------------------
 # `atomic=True` on `write_bytes`, `write_text` and `open` is the plain write,
 # made atomic: where the staging area would show, it acts as the plain write
-# does. A failure, before or during the commit, leaves nothing behind and
-# raises the error itself, not `CommitError`. It never keeps its data: the
-# caller still holds it.
+# does. It refuses a directory at the target, and a failure, before or during
+# the commit, leaves nothing behind and raises the error itself, not
+# `CommitError`. It never keeps its data: the caller still holds it, and it
+# never changes the type of the target, even with `replace_type=True`.
 class AtomicStage(Stage):
     """The staging area behind `atomic=True`."""
 

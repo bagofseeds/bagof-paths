@@ -137,7 +137,7 @@ def test_replace_existing_directory(tmp_path: pathlib.Path) -> None:
 
 def test_file_becomes_directory(tmp_path: pathlib.Path) -> None:
     (tmp_path / "out").write_text("a file")
-    with Path(tmp_path / "out").staged() as tmp:
+    with Path(tmp_path / "out").staged(replace_type=True) as tmp:
         tmp.mkdir()
         (tmp / "inner").write_text("x")
     assert (tmp_path / "out").is_dir()
@@ -147,7 +147,7 @@ def test_file_becomes_directory(tmp_path: pathlib.Path) -> None:
 def test_directory_becomes_file(tmp_path: pathlib.Path) -> None:
     (tmp_path / "out").mkdir()
     (tmp_path / "out" / "inner").write_text("x")
-    with Path(tmp_path / "out").staged() as tmp:
+    with Path(tmp_path / "out").staged(replace_type=True) as tmp:
         tmp.write_text("a file")
     assert (tmp_path / "out").read_text() == "a file"
     assert _listing(tmp_path) == ["out"]
@@ -425,12 +425,12 @@ def test_remote_directory_replaces_and_removes_stale(memory: None) -> None:
 def test_remote_type_changes(memory: None) -> None:
     target = Path("memory://bucket/out")
     target.write_text("a file")
-    with target.staged() as tmp:
+    with target.staged(replace_type=True) as tmp:
         tmp.mkdir()
         (tmp / "inner").write_text("x")
     assert target.is_dir()
     assert (target / "inner").read_text() == "x"
-    with target.staged() as tmp:
+    with target.staged(replace_type=True) as tmp:
         tmp.write_text("a file again")
     assert target.read_text() == "a file again"
 
@@ -621,11 +621,11 @@ def test_async_remote_over_a_native_driver(native: str) -> None:
         names = sorted([p.name async for p in tree.iterdir()])
         assert names == ["keep", "new"]
 
-        async with target.staged() as tmp:
+        async with target.staged(replace_type=True) as tmp:
             await tmp.mkdir()
             await (tmp / "inner").write_text("i")
         assert await target.is_dir()
-        async with target.staged() as tmp:
+        async with target.staged(replace_type=True) as tmp:
             await tmp.write_text("file again")
         assert await target.read_text() == "file again"
 
@@ -972,3 +972,161 @@ def test_a_failed_remote_atomic_upload_leaves_nothing_behind(
         target.write_text("new", atomic=True)
     assert not isinstance(info.value, CommitError)
     assert target.read_text() == "old"
+
+
+# -- a write refuses to change a directory into a file (issue #45) ------------
+# As pathlib and os.replace do. The atomic writers always refuse; staged()
+# refuses by default, and replace_type=True allows a change of type.
+def _a_tree(tmp_path: pathlib.Path) -> pathlib.Path:
+    tree = tmp_path / "x.nii"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "keep.txt").write_text("k")
+    return tree
+
+
+ATOMIC_WRITERS = {
+    "write_bytes": lambda p: p.write_bytes(b"new", atomic=True),
+    "write_text": lambda p: p.write_text("new", atomic=True),
+    "open-w": lambda p: p.open("w", atomic=True).close(),
+    "open-a": lambda p: p.open("a", atomic=True).close(),
+}
+
+
+async def _async_write(p: AsyncPath, how: str) -> None:
+    if how == "write_bytes":
+        await p.write_bytes(b"new", atomic=True)
+    elif how == "write_text":
+        await p.write_text("new", atomic=True)
+    else:
+        handle = await p.open("w" if how == "open-w" else "a", atomic=True)
+        await handle.close()
+
+
+@pytest.mark.parametrize("how", sorted(ATOMIC_WRITERS))
+def test_atomic_write_refuses_a_directory(
+    tmp_path: pathlib.Path, how: str
+) -> None:
+    tree = _a_tree(tmp_path)
+    with pytest.raises(IsADirectoryError) as info:
+        ATOMIC_WRITERS[how](Path(tree))
+    assert info.value.filename == str(tree)
+    assert (tree / "sub" / "keep.txt").read_text() == "k"
+    assert _listing(tmp_path) == ["x.nii"]
+
+    with pytest.raises(IsADirectoryError):
+        _run(_async_write(AsyncPath(tree), how))
+    assert (tree / "sub" / "keep.txt").read_text() == "k"
+    assert _listing(tmp_path) == ["x.nii"]
+
+
+def test_atomic_write_refuses_a_directory_made_while_writing(
+    tmp_path: pathlib.Path,
+) -> None:
+    # A check before the write cannot stand in for the one in the commit.
+    target = tmp_path / "x.nii"
+    handle = Path(target).open("wb", atomic=True)
+    handle.write(b"new")
+    _a_tree(tmp_path)
+    with pytest.raises(IsADirectoryError) as info:
+        handle.close()
+    assert info.value.filename == str(target)
+    assert (target / "sub" / "keep.txt").read_text() == "k"
+    assert _listing(tmp_path) == ["x.nii"]
+
+    async def go() -> None:
+        other = tmp_path / "y.nii"
+        handle = await AsyncPath(other).open("wb", atomic=True)
+        await handle.write(b"new")
+        other.mkdir()
+        with pytest.raises(IsADirectoryError):
+            await handle.close()
+        assert other.is_dir()
+
+    _run(go())
+    assert _listing(tmp_path) == ["x.nii", "y.nii"]
+
+
+def test_staged_refuses_a_change_of_type_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    tree = _a_tree(tmp_path)
+    stage = Path(tree).staged(keep_on_failure=True)
+    stage.path.write_text("a file")
+    with pytest.raises(CommitError) as info:
+        stage.commit()
+    assert info.value.errno == errno.EISDIR
+    assert isinstance(info.value.__cause__, IsADirectoryError)
+    assert (tree / "sub" / "keep.txt").read_text() == "k"
+    assert stage.path.read_text() == "a file"  # the work is kept
+    stage.discard()
+
+    (tmp_path / "f").write_text("old")
+    with pytest.raises(CommitError) as info:
+        with Path(tmp_path / "f").staged() as tmp:
+            tmp.mkdir()
+    assert info.value.errno == errno.ENOTDIR
+    assert (tmp_path / "f").read_text() == "old"
+    assert _listing(tmp_path) == ["f", "x.nii"]  # nothing left behind
+
+    # The same type is replaced as usual.
+    with Path(tree).staged() as tmp:
+        tmp.mkdir()
+        (tmp / "new").write_text("n")
+    assert _listing(tree) == ["new"]
+
+
+def test_async_staged_refuses_a_change_of_type_by_default(
+    tmp_path: pathlib.Path,
+) -> None:
+    tree = _a_tree(tmp_path)
+
+    async def go() -> None:
+        with pytest.raises(CommitError) as info:
+            async with AsyncPath(tree).staged() as tmp:
+                await tmp.write_text("a file")
+        assert info.value.errno == errno.EISDIR
+
+    _run(go())
+    assert (tree / "sub" / "keep.txt").read_text() == "k"
+
+
+def test_remote_atomic_write_refuses_a_directory(memory: None) -> None:
+    tree = Path("memory://bucket/out")
+    (tree / "keep").write_text("k")
+    with pytest.raises(IsADirectoryError) as info:
+        tree.write_text("a file", atomic=True)
+    assert info.value.filename == str(tree)
+    assert (tree / "keep").read_text() == "k"
+
+    with pytest.raises(IsADirectoryError):
+        _run(AsyncPath("memory://bucket/out").write_text("x", atomic=True))
+    assert (tree / "keep").read_text() == "k"
+
+    target = Path("memory://bucket/file")
+    target.write_text("old")
+    with pytest.raises(CommitError) as info:
+        with target.staged() as tmp:
+            tmp.mkdir()
+            (tmp / "inner").write_text("x")
+    assert info.value.errno == errno.ENOTDIR
+    assert target.read_text() == "old"
+
+
+def test_native_remote_atomic_write_refuses_a_directory(native: str) -> None:
+    async def go() -> None:
+        tree = AsyncPath(f"{native}://bucket/tree")
+        await (tree / "keep").write_text("k")
+        with pytest.raises(IsADirectoryError):
+            await tree.write_text("a file", atomic=True)
+        assert await (tree / "keep").read_text() == "k"
+
+        target = AsyncPath(f"{native}://bucket/file")
+        await target.write_text("old")
+        with pytest.raises(CommitError) as info:
+            async with target.staged() as tmp:
+                await tmp.mkdir()
+                await (tmp / "inner").write_text("x")
+        assert info.value.errno == errno.ENOTDIR
+        assert await target.read_text() == "old"
+
+    _run(go())

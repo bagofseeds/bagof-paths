@@ -142,9 +142,10 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         staging area and moved onto the path when it is closed, so readers
         see the old content or the new, never a half-written file; leaving
         a `with` block with an error discards it. An appending or `r+`
-        mode starts from a copy of the current content. If it fails,
-        closing included, it leaves nothing behind and raises the error as
-        the plain `open` would. See [`staged`][bagof.paths.Path.staged].
+        mode starts from a copy of the current content. Like the plain
+        `open`, it refuses a directory; if it fails, closing included, it
+        leaves nothing behind and raises the error as the plain `open`
+        would. See [`staged`][bagof.paths.Path.staged].
         """
         if atomic:
             copy = _staged.check_atomic_mode(mode)
@@ -191,8 +192,9 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
         With `atomic=True` the new content is written beside the file and
         moved over it in one step, so readers never see a partial file
-        (see [`staged`][bagof.paths.Path.staged]). If it fails, it leaves
-        nothing behind and raises the error as the plain write would.
+        (see [`staged`][bagof.paths.Path.staged]). Like the plain write, it
+        refuses a directory; if it fails, it leaves nothing behind and
+        raises the error as the plain write would.
         """
         if atomic:
             with _staged.AtomicStage(self) as staged:
@@ -225,7 +227,11 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- staged writes -----------------------------------------------------
     def staged(
-        self, *, copy: bool = False, keep_on_failure: bool = False
+        self,
+        *,
+        copy: bool = False,
+        replace_type: bool = False,
+        keep_on_failure: bool = False,
     ) -> _staged.Stage:
         """A staging area for a new version of this path.
 
@@ -267,15 +273,23 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         Outside a `with` block, call `commit()` or `discard()` on the
         returned [`Stage`][bagof.paths.Stage]; its `path` is the staged path.
 
+        A file never replaces a directory, nor a directory a file, unless
+        you pass `replace_type=True`: as with `pathlib`, committing raises
+        [`CommitError`][bagof.paths.CommitError] with the `errno` of
+        `IsADirectoryError` or `NotADirectoryError`, and this path is left
+        as it was. Pass it when the change is the new version you mean, such
+        as a zarr store moving from a zip file to a directory.
+
         What committing guarantees:
 
         - **A file** replaces a local file in one atomic step on POSIX
           (readers that have the old file open, even memory-mapped, keep
           reading it), and a remote object in one upload.
-        - **A directory**, or a change between file and directory, is
-          all-or-nothing but not atomic: the old version is moved aside and
-          the new one moved in, so it is briefly missing. On a remote path it
-          is uploaded file by file, and readers can see a mixture meanwhile.
+        - **A directory**, or a change between file and directory (with
+          `replace_type=True`), is all-or-nothing but not atomic: the old
+          version is moved aside and the new one moved in, so it is briefly
+          missing. On a remote path it is uploaded file by file, and readers
+          can see a mixture meanwhile.
         - An error inside the `with` block leaves this path as it was and
           removes the staged data.
         - If committing fails, this path is left as it was (or restored), the
@@ -285,7 +299,8 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
           costly to redo: the error says where, and the returned
           [`Stage`][bagof.paths.Stage] can `commit()` again or `discard()`.
           The `atomic=True` writers raise the original error rather than
-          `CommitError`, as the plain writers would.
+          `CommitError`, as the plain writers would, and refuse a directory
+          at this path, as the plain writers do.
 
         The staging area is a hidden directory beside this path (beside the
         file a symbolic link names), so the move stays on one file system; a
@@ -296,7 +311,8 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         another process has the file open.
         """
         return _staged.Stage(
-            self, copy=copy, keep_on_failure=keep_on_failure
+            self, copy=copy, replace_type=replace_type,
+            keep_on_failure=keep_on_failure,
         )
 
     # -- directory iteration -----------------------------------------------
