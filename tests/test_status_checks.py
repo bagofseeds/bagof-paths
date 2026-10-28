@@ -365,3 +365,76 @@ def test_no_follow_signature_tracks_the_method(
         _OldPathlib, "is_dir", lambda self, follow_symlinks=True: "native"
     )
     assert p.is_dir(follow_symlinks=False) == "native"
+
+
+class _OldAsyncRemote:
+    """A natively-async remote driver whose checks predate the keyword and
+    whose lstat fails: a remote error is never turned into False."""
+
+    protocol = "memory"
+    path = "/b/x"
+
+    def __str__(self) -> str:
+        return "memory://b/x"
+
+    async def exists(self) -> bool:
+        return True
+
+    async def is_file(self) -> bool:
+        return True
+
+    async def is_dir(self) -> bool:
+        return False
+
+    async def lstat(self) -> os.stat_result:
+        raise PermissionError(errno.EACCES, "denied")
+
+
+def test_no_follow_native_async_remote_error_propagates() -> None:
+    p = AsyncPath(_OldAsyncRemote())
+    for name in SIMPLE:
+        with pytest.raises(PermissionError):
+            _run(getattr(p, name)(follow_symlinks=False))
+
+
+class _NoSignature:
+    """A callable whose signature cannot be read."""
+
+    __signature__ = "not a signature"
+
+    def __call__(self, *args: tx.Any, **kwargs: tx.Any) -> bool:
+        return True
+
+
+class _Unhashable:
+    """A callable class attribute that cannot be a cache key."""
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __call__(self, *, follow_symlinks: bool = True) -> bool:
+        return True
+
+
+@pytest.mark.parametrize(
+    "method, expected",
+    [
+        (lambda **kwargs: True, True),  # **kwargs takes any keyword
+        (_NoSignature(), True),  # unreadable signature: the call decides
+        (lambda: True, False),
+    ],
+    ids=["var-keyword", "no-signature", "no-keyword"],
+)
+def test_accepts_reads_the_signature(method: tx.Any, expected: bool) -> None:
+    from bagof.paths import _engine
+
+    driver = type("_Driver", (), {"is_file": staticmethod(method)})()
+    assert _engine.accepts(
+        driver, "is_file", {"follow_symlinks": False}
+    ) is expected
+
+
+def test_accepts_an_unhashable_class_attribute() -> None:
+    from bagof.paths import _engine
+
+    driver = type("_Driver", (), {"is_file": _Unhashable()})()
+    assert _engine.accepts(driver, "is_file", {"follow_symlinks": False})
