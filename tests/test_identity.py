@@ -242,12 +242,6 @@ def test_pathlib_is_relative_to_a_wrapper() -> None:
     assert not pathlib.Path("/a/b/c").is_relative_to(Path("/x"))
 
 
-@pytest.mark.xfail(
-    sys.version_info >= (3, 14),
-    reason="pathlib 3.14 reads a private attribute of the argument (#30)",
-    raises=AttributeError,
-    strict=True,
-)
 def test_pathlib_relative_to_a_wrapper() -> None:
     assert pathlib.Path("/a/b/c").relative_to(Path("/a")) == pathlib.Path(
         "b/c"
