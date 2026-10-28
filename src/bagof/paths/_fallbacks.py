@@ -21,7 +21,6 @@ import stat
 
 import typing_extensions as tx
 
-from ._constants import LOCAL_PROTOCOLS
 from ._errors import UnsupportedPathOperation
 
 
@@ -112,7 +111,7 @@ def with_segments(wrapper: tx.Any, *segments: tx.Any) -> tx.Any:
     bare `type(wrapped)(*segments)` would drop, silently pointing the new
     path at a different or unauthenticated store.
     """
-    if wrapper.protocol not in LOCAL_PROTOCOLS:
+    if not wrapper.is_local():
         raise UnsupportedPathOperation(
             "with_segments",
             driver=wrapper._wrapped,
@@ -132,7 +131,7 @@ def hardlink_to(wrapper: tx.Any, target: tx.Any) -> None:
     filesystem operation, so a non-local driver without a native
     `hardlink_to` is refused rather than guessed at.
     """
-    if wrapper.protocol not in LOCAL_PROTOCOLS:
+    if not wrapper.is_local():
         raise UnsupportedPathOperation(
             "hardlink_to",
             driver=wrapper._wrapped,
@@ -149,7 +148,7 @@ def is_junction(wrapper: tx.Any) -> bool:
     an older interpreter, a non-local path -- is not a junction.
     """
     isjunction = getattr(os.path, "isjunction", None)
-    if isjunction is not None and wrapper.protocol in LOCAL_PROTOCOLS:
+    if isjunction is not None and wrapper.is_local():
         return isjunction(os.fspath(wrapper._wrapped))
     return False
 

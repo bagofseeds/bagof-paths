@@ -21,7 +21,7 @@ import re
 
 import typing_extensions as tx
 
-from ._constants import LOCAL_PROTOCOLS
+from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
 
 
 class ProtocolTraits:
@@ -252,6 +252,30 @@ def path_part(text: str) -> str:
         return text
     traits = traits_for(scheme)
     return strip_url_query(text, query=traits.query, fragment=traits.fragment)
+
+
+_CHAIN_LINK_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)(?:://|$)")
+
+
+def chain_links(text: str) -> tx.Tuple[str, ...]:
+    """The schemes of an fsspec chain URL, outermost first; `()` otherwise.
+
+    `simplecache::s3://bucket/key` gives `("simplecache", "s3")`. A chain
+    is spelled with no leading `scheme://` (the constructors read a string
+    that starts with one as that scheme's URL), so a plain URL or a local
+    path is not a chain.
+    """
+    if "::" not in text or "://" not in text or SCHEME_RE.match(text):
+        return ()
+    links = []
+    for link in text.split("::"):
+        match = _CHAIN_LINK_RE.match(link)
+        if match is None:
+            break
+        links.append(match.group(1).lower())
+        if match.group(0).endswith("://"):
+            break
+    return tuple(links) if len(links) > 1 else ()
 
 
 def canonical_scheme(scheme: str) -> str:
