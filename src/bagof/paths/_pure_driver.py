@@ -40,6 +40,19 @@ from ._errors import UnsupportedPathOperation
 from ._protocols import canonical_scheme, traits_for
 
 
+def _chain_split(url: str) -> tx.Tuple[str, str]:
+    """The chain prefix and the inner scheme of an fsspec chain URL.
+
+    `simplecache::s3://b/k` gives `("simplecache::", "s3")`: the prefix is
+    kept verbatim for display, and the inner scheme -- the store the key
+    lives in -- decides how the key splits. A URL that is not a chain gives
+    an empty prefix and its own scheme.
+    """
+    head = url.split("://", 1)[0] if "://" in url else ""
+    prefix, sep, inner = head.rpartition("::")
+    return prefix + sep, inner
+
+
 def _split_url(scheme: str, url: str) -> tx.Tuple[str, PurePosixPath]:
     """The drive and the key path of a URL, by the scheme's traits.
 
@@ -68,7 +81,7 @@ class PureCloudPath:
     with a hint to install a backend.
     """
 
-    __slots__ = ("_scheme", "_drive", "_pure", "_options")
+    __slots__ = ("_scheme", "_drive", "_pure", "_options", "_chain", "_inner")
 
     def __init__(
         self,
@@ -76,11 +89,18 @@ class PureCloudPath:
         drive: str,
         pure: PurePosixPath,
         options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+        chain: str = "",
+        inner: tx.Optional[str] = None,
     ) -> None:
+        # `scheme` is the identity scheme (empty for an fsspec chain). A
+        # chain also keeps its prefix (`simplecache::`) and the inner scheme
+        # its key belongs to, so `str()` reassembles the whole URL.
         self._scheme = scheme
         self._drive = drive
         self._pure = pure
         self._options = dict(options or {})
+        self._chain = chain
+        self._inner = scheme if inner is None else inner
 
     @classmethod
     def from_url(
@@ -89,13 +109,23 @@ class PureCloudPath:
         scheme: str,
         options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> PureCloudPath:
-        """Build a path from a full URL, splitting off the drive and key."""
-        drive, pure = _split_url(scheme, url)
-        return cls(scheme, drive, pure, options)
+        """Build a path from a full URL, splitting off the drive and key.
+
+        An fsspec chain (`simplecache::s3://...`, identity scheme `""`)
+        splits its key by the inner scheme, as universal-pathlib does.
+        """
+        chain, inner = ("", scheme) if scheme else _chain_split(url)
+        if not chain:
+            inner = scheme
+        drive, pure = _split_url(inner.lower(), url[len(chain):])
+        return cls(scheme, drive, pure, options, chain, inner)
 
     def _derive(self, pure: PurePosixPath) -> PureCloudPath:
         """A sibling path with the same scheme and drive, at `pure`."""
-        return PureCloudPath(self._scheme, self._drive, pure, self._options)
+        return PureCloudPath(
+            self._scheme, self._drive, pure, self._options,
+            self._chain, self._inner,
+        )
 
     # -- location ----------------------------------------------------------
     @property
@@ -189,7 +219,7 @@ class PureCloudPath:
         # scheme: a scheme-less text is read as following `scheme://`.
         text = "/".join(path_text(s) for s in segments)
         if "://" not in text:
-            text = "{}://{}".format(self._scheme, text.lstrip("/"))
+            text = f"{self._chain}{self._inner}://{text.lstrip('/')}"
         match = SCHEME_RE.match(text)
         scheme = match.group(1).lower() if match else self._scheme
         return PureCloudPath.from_url(text, scheme, self._options)
@@ -232,8 +262,7 @@ class PureCloudPath:
             match = SCHEME_RE.match(text)
             scheme = match.group(1).lower() if match else self._scheme
             self._require_same_scheme(scheme)
-            drive, pure = _split_url(scheme, text)
-            return PureCloudPath(scheme, drive, pure)._locus()
+            return PureCloudPath.from_url(text, scheme)._locus()
         return PurePosixPath(text)
 
     def _require_same_scheme(self, other_scheme: str) -> None:
@@ -266,6 +295,10 @@ class PureCloudPath:
     # -- display -----------------------------------------------------------
     def __str__(self) -> str:
         # Match universal-pathlib: scheme://<path without a leading slash>.
+        # A chain keeps its prefix and, as universal-pathlib does, the key
+        # path as it stands (memory's "/d/x" reads "...memory:///d/x").
+        if self._chain:
+            return f"{self._chain}{self._inner}://{self.path}"
         return "{}://{}".format(self._scheme, self.path.lstrip("/"))
 
     def __repr__(self) -> str:
@@ -276,7 +309,7 @@ class PureCloudPath:
     def _unsupported_hint(self) -> str:
         # The engine reads this when it cannot delegate or synthesize a member,
         # so an I/O call on a backendless path explains the remedy.
-        prefix = f"{self._scheme}://"
+        prefix = f"{self._chain}{self._inner}://"
         return (
             f"no backend is installed to perform I/O on {prefix!r}; install "
             "universal-pathlib or cloudpathlib, or pass driver= a path class"

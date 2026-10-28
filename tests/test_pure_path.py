@@ -13,6 +13,7 @@ import pathlib
 import sys
 
 import pytest
+import typing_extensions as tx
 
 from bagof.paths import AsyncPath, Path, PurePath, UnsupportedPathOperation
 from bagof.paths._pure_driver import PureCloudPath
@@ -295,6 +296,98 @@ def test_construction_of_an_fsspec_chain() -> None:
     assert isinstance(p.wrapped, PureCloudPath)
     # A chain has no single identity scheme.
     assert p.protocol == ""
+
+
+# An fsspec chain keeps its whole prefix, and its key splits by the inner
+# scheme (issue #33). Each entry is (url, str, name, parent, parts).
+CHAIN_CASES = [
+    (
+        "simplecache::s3://b/dir/x.txt",
+        "simplecache::s3://b/dir/x.txt", "x.txt",
+        "simplecache::s3://b/dir", ("b/", "dir", "x.txt"),
+    ),
+    (
+        "filecache::gs://b/a/b.txt",
+        "filecache::gs://b/a/b.txt", "b.txt",
+        "filecache::gs://b/a", ("b/", "a", "b.txt"),
+    ),
+    (
+        "simplecache::memory://d/x.txt",
+        "simplecache::memory:///d/x.txt", "x.txt",
+        "simplecache::memory:///d", ("/", "d", "x.txt"),
+    ),
+    (
+        "simplecache::s3://b/dir/x.txt?v=1",
+        "simplecache::s3://b/dir/x.txt?v=1", "x.txt",
+        "simplecache::s3://b/dir", ("b/", "dir", "x.txt"),
+    ),
+]
+
+
+def _no_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bagof.paths._select as sel
+
+    monkeypatch.setattr(sel, "_upath_class", lambda: None)
+    monkeypatch.setattr(sel, "_cloudpathlib_impl", lambda scheme: None)
+
+
+@pytest.mark.parametrize("url, text, name, parent, parts", CHAIN_CASES)
+@pytest.mark.parametrize("front", ["pure", "no-backend"])
+def test_fsspec_chain_keeps_its_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    front: str,
+    url: str,
+    text: str,
+    name: str,
+    parent: str,
+    parts: tx.Tuple[str, ...],
+) -> None:
+    if front == "pure":
+        p = PurePath(url)
+    else:
+        _no_backend(monkeypatch)
+        p = Path(url)
+    assert isinstance(p.wrapped, PureCloudPath)
+    assert p.protocol == ""  # identity scheme of a chain stays empty
+    assert str(p) == text
+    assert p.name == name
+    assert str(p.parent) == parent
+    assert p.parts == parts
+    # Derived paths keep the prefix too.
+    assert str(p.parent / "y") == parent + "/y"
+    assert str(p.with_name("z")) == parent + "/z"
+
+
+def test_fsspec_chain_with_several_links() -> None:
+    p = PurePath("a::b::s3://bkt/dir/k")
+    assert str(p) == "a::b::s3://bkt/dir/k"
+    assert str(p.parent) == "a::b::s3://bkt/dir"
+    assert p.parts == ("bkt/", "dir", "k")
+
+
+def test_fsspec_chain_relative_to() -> None:
+    p = PurePath("simplecache::s3://b/dir/x.txt")
+    assert str(p.relative_to("simplecache::s3://b/dir")) == "x.txt"
+    assert str(p.relative_to(PurePath("simplecache::s3://b"))) == "dir/x.txt"
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+@pytest.mark.parametrize("url, text, name, parent, parts", CHAIN_CASES)
+def test_fsspec_chain_matches_universal_pathlib(
+    url: str,
+    text: str,
+    name: str,
+    parent: str,
+    parts: tx.Tuple[str, ...],
+) -> None:
+    upath = pytest.importorskip("upath")
+    real = upath.UPath(url)
+    p = PurePath(url)
+    assert str(p) == str(real)
+    assert p.name == real.name.split("?")[0]  # a query is not part of a name
+    assert str(p.parent) == str(real.parent)
+    assert p.parts[:-1] == real.parts[:-1]
+    assert str(p / "y") == str(upath.UPath(text.split("?")[0]) / "y")
 
 
 def test_construction_from_a_file_url(tmp_path: pathlib.Path) -> None:

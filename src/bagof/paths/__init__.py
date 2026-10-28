@@ -7,7 +7,12 @@ private.
 
 from ._async_path import AsyncPath
 from ._drivers import register_driver
-from ._errors import CommitError, NoDriverError, UnsupportedPathOperation
+from ._errors import (
+    CommitError,
+    NoDriverError,
+    NoLocalPathError,
+    UnsupportedPathOperation,
+)
 from ._path import Path
 from ._protocols import (
     ProtocolTraits,
@@ -22,6 +27,7 @@ __all__ = [
     "AsyncStage",
     "CommitError",
     "NoDriverError",
+    "NoLocalPathError",
     "Path",
     "ProtocolTraits",
     "PurePath",
