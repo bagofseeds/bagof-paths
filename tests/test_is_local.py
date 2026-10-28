@@ -209,3 +209,15 @@ def test_no_local_path_error_is_public() -> None:
 
     assert "NoLocalPathError" in bagof.paths.__all__
     assert bagof.paths.NoLocalPathError is NoLocalPathError
+
+
+def test_chain_links() -> None:
+    from bagof.paths._protocols import chain_links
+
+    assert chain_links("simplecache::s3://b/k") == ("simplecache", "s3")
+    assert chain_links("SimpleCache::S3://b/k") == ("simplecache", "s3")
+    assert chain_links("a::b::s3://b/k::x") == ("a", "b", "s3")
+    # Not chains: a plain URL, a local name, a link that is no scheme.
+    assert chain_links("s3://b/k::x") == ()
+    assert chain_links("/tmp/a::b") == ()
+    assert chain_links("my file::s3://b/k") == ()
