@@ -120,9 +120,12 @@ def test_resolve_returns_async_path(tmp_path: pathlib.Path) -> None:
     _run(go())
 
 
-def test_async_and_sync_paths_are_never_equal() -> None:
-    # Different front-end families must not compare equal (settled identity).
-    assert (AsyncPath("/a/b") == Path("/a/b")) is False
+def test_async_and_sync_paths_at_one_location_are_equal() -> None:
+    # Identity is the location, whatever the front-end (issue #22).
+    assert AsyncPath("/a/b") == Path("/a/b")
+    assert Path("/a/b") == AsyncPath("/a/b")
+    assert hash(AsyncPath("/a/b")) == hash(Path("/a/b"))
+    assert AsyncPath("/a/b") != Path("/a/c")
     assert AsyncPath("/a/b") == AsyncPath("/a/b")
     assert hash(AsyncPath("/a/b")) == hash(AsyncPath("/a/b"))
 

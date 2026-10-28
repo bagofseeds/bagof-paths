@@ -626,9 +626,10 @@ def test_identity() -> None:
     assert a == b
     assert hash(a) == hash(b)
     assert a != AsyncPath("memasync://bucket/other")
-    # A sync and async path never compare equal, even at the same URL.
+    # A sync and an async path at the same URL are equal (issue #22).
     pytest.importorskip("upath")
-    assert a != Path("memasync://bucket/key")
+    assert a == Path("memasync://bucket/key")
+    assert hash(a) == hash(Path("memasync://bucket/key"))
 
 
 # -- members the store lacks ------------------------------------------------

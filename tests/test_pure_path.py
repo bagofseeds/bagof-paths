@@ -88,12 +88,15 @@ def test_alias_identity() -> None:
     assert hash(PurePath("s3://b/k")) == hash(PurePath("s3a://b/k"))
 
 
-def test_cross_family_inequality() -> None:
+def test_pure_path_equals_async_path() -> None:
     async def build() -> AsyncPath:
         return AsyncPath("/a/b")
 
     other = asyncio.run(build())
-    assert (PurePath("/a/b") == other) is False
+    assert PurePath("/a/b") == other
+    assert other == PurePath("/a/b")
+    assert hash(PurePath("/a/b")) == hash(other)
+    assert PurePath("s3://b/k") == AsyncPath("s3a://b/k")
 
 
 # -- identity parity against the real universal-pathlib backend -------------

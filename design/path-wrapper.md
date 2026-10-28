@@ -372,15 +372,46 @@ registry.
   cloud paths unusable with APIs that call `os.fspath` — which they are.
   *(Owner may veto toward cloudpathlib-style download-on-demand; do it
   explicitly if so, never as an ambient side effect.)*
-- **Equality/hash [settled].** The reference defines neither (its own TODO).
-  Wrapper equality: `a == b` iff both are wrappers of the same *front-end
-  family* (sync/async compare equal to each other? No — same family only) and
-  their canonical `(protocol, str)` match — **driver-independent**, because
-  the drivers themselves disagree (`UPath(u) != AnyPath(u)`), and the whole
-  point of the wrapper is that the driver is an implementation detail.
-  `hash` follows. Ordering operators: not in v1 (pathlib orders only
-  same-flavour paths; no consumer evidence). Windows case-insensitivity is
-  explicitly not modeled (we compare canonical strings).
+- **Equality/hash [settled; revised by issue #22].** The reference defines
+  neither (its own TODO). `a == b` iff their canonical `(protocol, path)`
+  locations match — **driver-independent**, because the drivers themselves
+  disagree (`UPath(u) != AnyPath(u)`), and the whole point of the wrapper is
+  that the driver is an implementation detail. **Front-end-independent**
+  too: `PurePath`, `Path` and `AsyncPath` at one location are equal and hash
+  alike (as `anyio.Path` equals `pathlib.Path`), so equality is transitive.
+  (The first rule kept sync and async apart; it was dropped with #22.)
+  - *Unwrapped operands.* `__eq__` reads the other operand as a path when it
+    is a driver object (`pathlib`, `UPath`, `CloudPath`, `anyio.Path`: the
+    `_args.is_driver` test, never its `__fspath__`, which downloads on
+    cloudpathlib) or a plain `os.PathLike` (read with `os.fspath`, so a
+    local name). A `str`/`bytes` is never a path — every library agrees —
+    and any other type gives `NotImplemented`. The reflected direction
+    works because `pathlib`'s and universal-pathlib's `__eq__` return
+    `NotImplemented` for a foreign type; cloudpathlib's returns `False`, so
+    `cloud == wrapper` stays `False` (only `wrapper == cloud` is true).
+    Motivation: brainhops compared a returned wrapper with the
+    `pathlib.Path` it passed in and silently got `False`.
+  - *Local identity carries the flavour.* A local key is
+    `("", path, PurePosixPath | PureWindowsPath)` — the flavour of a
+    `pathlib` driver, else the platform's — because `pathlib` never equals a
+    POSIX path to a Windows one, and the hash below is the flavour's.
+  - *Hash.* A local path hashes as `hash(flavour(path))`, i.e. exactly as
+    `pathlib` does on the running version (3.8–3.11 hash the case-folded
+    parts tuple, 3.12+ the case-folded string; both computed by `pathlib`
+    itself, never re-implemented). A remote path keeps
+    `hash((canonical_scheme, path))`, which is universal-pathlib's own hash
+    for a canonical scheme. Equal-hash cannot hold everywhere: cloudpathlib
+    hashes `(class name, URL)`, and universal-pathlib hashes an alias as
+    spelled (`UPath("s3a://…")`), so for those `x == y` but
+    `x in {y}` may be false. Documented, not fixable from our side.
+  - *Location only.* `storage_options` and other connection state do not
+    count (`Path(UPath(u, anon=True)) == UPath(u, anon=False)`), unlike
+    universal-pathlib, which compares options too.
+
+  Ordering operators: not in v1 (pathlib orders only same-flavour paths; no
+  consumer evidence). Windows case-insensitivity is explicitly not modeled
+  in equality (we compare canonical strings): `Path(PureWindowsPath("C:/A"))`
+  does not equal `PureWindowsPath("c:/a")`, though their hashes agree.
 - **Dependency-free lexical driver [settled].** With no backend installed, a
   remote URL is backed by a stdlib-only lexical driver (`_pure_driver.py`) that
   reproduces the `(protocol, path)` identity of a real backend so a path means
