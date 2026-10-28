@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import copy
 import os
-import re
 from pathlib import Path as LocalPath
 
 import typing_extensions as tx
@@ -40,8 +39,8 @@ from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
 from ._protocols import (
     canonical_scheme,
-    has_query,
     merged_storage_options,
+    path_part,
     strip_url_query,
     traits_for,
 )
@@ -49,8 +48,6 @@ from ._spec import BY_NAME
 
 _MISSING = object()
 
-# The outer scheme of a URL or of an fsspec chain ("simplecache::s3://...").
-_LEADING_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)(?:://|::)")
 
 
 class BaseWrapper:
@@ -270,11 +267,12 @@ class BaseWrapper:
 
     # -- the path without its URL query -----------------------------------
     def _query_free(self) -> tx.Self:
-        """This path without its URL query and fragment.
+        """This path without its URL query (and an http fragment).
 
         The lexical members run on this view, so a query (a token, a version
-        id) and a fragment are not part of the name, the parts or the
-        parent, and a name moves from one store to another without them.
+        id) is not part of the name, the parts or the parent, and a name
+        moves from one store to another without it. Only an http URL has a
+        fragment; elsewhere a `#` is part of the name.
         The path itself keeps them, since I/O needs them to reach the
         object. A derived path does not carry them, as in URL resolution
         (RFC 3986): it names a different object.
@@ -289,15 +287,8 @@ class BaseWrapper:
 
     @staticmethod
     def _query_free_text(text: str) -> str:
-        """A URL string without its query and fragment, by its scheme.
-
-        An fsspec chain (`simplecache::s3://...`) is read by its outer
-        scheme; a plain local path has no scheme and is returned as it is.
-        """
-        match = _LEADING_SCHEME_RE.match(text)
-        if match is not None and has_query(match.group(1).lower()):
-            return strip_url_query(text)
-        return text
+        """A URL string without its query (and an http fragment)."""
+        return path_part(text)
 
     def _rebuilt(self, text: str) -> tx.Optional[tx.Self]:
         """This path's driver rebuilt at the URL `text`, or `None`.
@@ -561,10 +552,11 @@ def _local_from_url(text: str, scheme: str) -> LocalPath:
     """A local path from a `file://` / `local://` URL, on any version."""
     if scheme == "file":
         return _local_from_file_uri(text)
-    # local:// is fsspec's name for the local filesystem. Like any URL, its
-    # query and fragment are not part of the path; what remains is read as
-    # it is, with no percent-decoding, as fsspec reads it.
-    return LocalPath(strip_url_query(text).split("://", 1)[1] or ".")
+    # local:// is fsspec's name for the local filesystem. As in any non-http
+    # URL its query is not part of the path and a "#" is; the rest is read
+    # as it is, with no percent-decoding, as fsspec reads it.
+    text = strip_url_query(text, fragment=False)
+    return LocalPath(text.split("://", 1)[1] or ".")
 
 
 def _local_from_file_uri(uri: str) -> LocalPath:

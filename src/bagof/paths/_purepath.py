@@ -18,8 +18,8 @@ from ._spec import BY_NAME
 class PurePathMixin:
     """Lexical path operations, delegated or computed on the canonical path.
 
-    A URL's query and fragment are not part of its path, so every member
-    here that reads or derives a path runs on the path without them.
+    A URL's query (and an http fragment) is not part of its path, so every
+    member here that reads or derives a path runs on the path without it.
     """
 
     # No instance state: keeps the wrappers slotted (no __dict__ leaks in).
@@ -87,12 +87,13 @@ class PurePathMixin:
         )
 
     def without_query(self) -> tx.Self:
-        """The path without its URL query and fragment.
+        """The path without its URL query (and an http fragment).
 
         The same location with any token or version id removed. `name` and
-        the other members already leave them out; this gives the whole path
-        without them, for instance to show a URL or to build a path from it
-        in another store. A local path has no query and comes back as it
+        the other members already leave it out; this gives the whole path
+        without it, for instance to show a URL or to build a path from it
+        in another store. Only an http URL has a fragment; elsewhere a `#`
+        is part of the name. A local path has no query and comes back as it
         is.
 
         ```pycon

@@ -146,10 +146,12 @@ PurePath('/data/sets/train.zip')
 True
 ```
 
-A URL's query and fragment are not part of its name, on any scheme. So a
+A URL's query is not part of its name, on any scheme: everything from the
+first `?` is left out (and, in an `http` URL, from the first `#`). So a
 presigned or versioned URL still has the right suffix, and its name can name
-a file in another store. The path itself keeps them, so a read still sends
-the token.
+a file in another store. The path itself keeps the query, so a read still
+sends the token. Outside `http`, a `#` is part of the name, as in
+`Invoice #12.pdf`.
 
 ```pycon
 >>> url = PurePath("https://example.org/data/brain.nii.gz?token=abc")

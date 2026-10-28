@@ -17,6 +17,8 @@ would change their hashes.
 
 from __future__ import annotations
 
+import re
+
 import typing_extensions as tx
 
 from ._constants import LOCAL_PROTOCOLS
@@ -36,11 +38,14 @@ class ProtocolTraits:
         Other schemes that name the same store (`s3a` for `s3`); folded
         onto this scheme for identity so the spellings compare equal.
     query:
-        A `?` in a URL of this scheme starts its query and a `#` its
-        fragment, so the path's name, parts and parent leave them out, and a
-        name moves between stores without them. On by default; turn it off
-        for a store whose keys hold `?` or `#` as ordinary characters that
-        must stay in the name.
+        A `?` in a URL of this scheme starts its query, so the path's name,
+        parts and parent leave it out, and a name moves between stores
+        without it. On by default; turn it off for a store whose keys hold
+        `?` as an ordinary character that must stay in the name.
+    fragment:
+        A `#` in a URL of this scheme starts its fragment, which the name
+        leaves out too. On for `http` and `https` only: elsewhere `#` is an
+        ordinary character of a name (`Invoice #12.pdf`).
     driver:
         A preferred factory (a driver class, or a `str -> path` callable)
         used to build a path of this scheme before the availability order.
@@ -52,7 +57,7 @@ class ProtocolTraits:
     """
 
     __slots__ = (
-        "bucketed", "absolute", "aliases", "query", "driver",
+        "bucketed", "absolute", "aliases", "query", "fragment", "driver",
         "storage_options",
     )
 
@@ -63,6 +68,7 @@ class ProtocolTraits:
         absolute: bool = False,
         aliases: tx.Iterable[str] = (),
         query: bool = True,
+        fragment: bool = False,
         driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
         storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> None:
@@ -70,6 +76,7 @@ class ProtocolTraits:
         self.absolute = absolute
         self.aliases = tuple(aliases)
         self.query = query
+        self.fragment = fragment
         self.driver = driver
         self.storage_options = dict(storage_options or {})
 
@@ -83,6 +90,7 @@ class ProtocolTraits:
             "ProtocolTraits("
             f"bucketed={self.bucketed!r}, absolute={self.absolute!r}, "
             f"aliases={self.aliases!r}, query={self.query!r}, "
+            f"fragment={self.fragment!r}, "
             f"driver={_driver_name(self.driver)}, "
             f"storage_options={options})"
         )
@@ -110,6 +118,7 @@ def register_protocol(
     absolute: bool = False,
     aliases: tx.Iterable[str] = (),
     query: bool = True,
+    fragment: bool = False,
     driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> None:
@@ -128,9 +137,10 @@ def register_protocol(
     credentials, ...) forwarded to the driver for every path of this scheme;
     a per-call `storage_options` overrides them key by key.
 
-    `query=False` says a `?` or `#` in this scheme's URLs is an ordinary
+    `query=False` says a `?` in this scheme's URLs is an ordinary
     character of the path, kept in its name; by default it starts the
-    query or the fragment, which the name leaves out.
+    query, which the name leaves out. `fragment=True` says a `#` starts a
+    fragment, as in `http`; by default it is an ordinary character.
 
     Register at import time -- see the module note on identity.
     """
@@ -149,6 +159,7 @@ def register_protocol(
         absolute=absolute,
         aliases=new_aliases,
         query=query,
+        fragment=fragment,
         driver=driver,
         storage_options=storage_options,
     )
@@ -187,6 +198,7 @@ def set_storage_options(
         absolute=current.absolute,
         aliases=current.aliases,
         query=current.query,
+        fragment=current.fragment,
         driver=current.driver,
         storage_options=storage_options,
     )
@@ -205,26 +217,41 @@ def merged_storage_options(
     return base
 
 
-def strip_url_query(text: str) -> str:
-    """`text` without its URL query and fragment.
+def strip_url_query(
+    text: str, *, query: bool = True, fragment: bool = True
+) -> str:
+    """`text` without its URL query and (or) fragment.
 
     The query starts at the first `?` and the fragment at the first `#`
-    (RFC 3986); whichever comes first ends the path. The search starts after
+    (RFC 3986); the first enabled one ends the path. The search starts after
     the `scheme://`, so a scheme-less fsspec path is handled the same way.
     """
     start = text.find("://")
     start = 0 if start < 0 else start + 3
-    ends = [text.find(char, start) for char in "?#"]
+    marks = ("?" if query else "") + ("#" if fragment else "")
+    ends = [text.find(char, start) for char in marks]
     ends = [end for end in ends if end >= 0]
     return text[:min(ends)] if ends else text
 
 
-def has_query(scheme: str) -> bool:
-    """Whether a `?` or `#` in a URL of `scheme` starts a query or fragment.
+# The outer scheme of a URL or of an fsspec chain ("simplecache::s3://...").
+_LEADING_SCHEME_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*)(?:://|::)")
 
-    A local path has neither: `?` and `#` are ordinary filename characters.
+
+def path_part(text: str) -> str:
+    """A URL string without its query and fragment, by its scheme's traits.
+
+    An fsspec chain (`simplecache::s3://...`) is read by its outer scheme; a
+    plain local path, or a local scheme, is returned as it is.
     """
-    return scheme not in LOCAL_PROTOCOLS and traits_for(scheme).query
+    match = _LEADING_SCHEME_RE.match(text)
+    if match is None:
+        return text
+    scheme = match.group(1).lower()
+    if scheme in LOCAL_PROTOCOLS:
+        return text
+    traits = traits_for(scheme)
+    return strip_url_query(text, query=traits.query, fragment=traits.fragment)
 
 
 def canonical_scheme(scheme: str) -> str:
@@ -253,6 +280,10 @@ def _register_builtin_protocols() -> None:
     )
     # memory is a flat absolute namespace, but not bucketed.
     register_protocol("memory", absolute=True)
+    # Only an http URL has a fragment: fsspec never sends it, and elsewhere a
+    # "#" is an ordinary character of a name.
+    register_protocol("http", fragment=True)
+    register_protocol("https", fragment=True)
 
 
 _register_builtin_protocols()

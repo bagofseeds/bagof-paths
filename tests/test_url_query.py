@@ -1,13 +1,15 @@
-"""A URL's query and fragment are not part of its path (issue #17).
+"""A URL's query is not part of its path (issue #17).
 
-A `?` in a remote URL starts its query and a `#` its fragment (RFC 3986), on
-every scheme and every driver. The lexical members (`name`, `suffix`, `parts`,
-`parent`, ...) leave them out, so a name moves from one store to another (a
-cloud input to a local output) without a token or a version id riding along.
-The string of the path keeps them, since I/O needs them. A derived path names
-a different object, so it does not carry them. A local path has no query: a
-`?` or `#` in a local name is an ordinary character. A scheme whose keys hold
-`?` or `#` literally opts out with `register_protocol(..., query=False)`.
+A `?` in a remote URL starts its query, on every scheme and every driver. The
+lexical members (`name`, `suffix`, `parts`, `parent`, ...) leave it out, so a
+name moves from one store to another (a cloud input to a local output) without
+a token or a version id riding along. Only an `http(s)` URL also has a
+fragment, from its first `#`; elsewhere `#` is an ordinary character of a name
+(`Invoice #12.pdf`), as every store library reads it. The string of the path
+keeps everything, since I/O needs it. A derived path names a different object,
+so it does not carry the query. A local path has no query: a `?` or `#` in a
+local name is an ordinary character. A scheme whose keys hold `?` literally
+opts out with `register_protocol(..., query=False)`.
 """
 
 import os
@@ -49,7 +51,8 @@ FRONTS = [PurePath, Path, AsyncPath]
         ("s3://b/dir/x.nii.gz?versionId=abc", "x.nii.gz", ".gz",
          "s3://b/dir"),
         ("s3://b/dir/x.nii.gz?sig=a/b.zip", "x.nii.gz", ".gz", "s3://b/dir"),
-        ("gs://b/dir/x.nii.gz#123", "x.nii.gz", ".gz", "gs://b/dir"),
+        ("gs://b/dir/x.nii.gz?generation=123", "x.nii.gz", ".gz",
+         "gs://b/dir"),
         ("gs://b/dir/k.txt?x=1#f", "k.txt", ".txt", "gs://b/dir"),
         ("memory://dir/x.nii.gz?q=1#f", "x.nii.gz", ".gz", "memory://dir"),
     ],
@@ -134,6 +137,36 @@ def test_cloudpathlib_name_leaves_out_the_query_too() -> None:
     assert p.name == "x"
 
 
+# -- "#" is a fragment only in an http URL ---------------------------------
+@pytest.mark.parametrize("cls", FRONTS)
+@pytest.mark.parametrize(
+    "url, name",
+    [
+        ("s3://b/dir/Invoice #12.pdf", "Invoice #12.pdf"),
+        ("s3://b/dir/x.nii.gz#f", "x.nii.gz#f"),
+        # The query starts at the "?", after the "#" that is part of the name.
+        ("s3://b/dir/x#a?b", "x#a"),
+        # gcsfs's "#<generation>" shorthand is part of the name;
+        # "?generation=" is the query spelling.
+        ("gs://b/dir/x.nii.gz#123", "x.nii.gz#123"),
+        ("memory://dir/x#1.txt?q=1", "x#1.txt"),
+    ],
+)
+def test_hash_is_part_of_a_name_outside_http(
+    cls: type, url: str, name: str
+) -> None:
+    p = cls(url)
+    assert p.name == name
+    assert str(p) == url
+
+
+@pytest.mark.parametrize("cls", FRONTS)
+def test_hash_starts_an_http_fragment(cls: type) -> None:
+    p = cls("https://h/dir/Invoice #12.pdf")
+    assert p.name == "Invoice "
+    assert p.without_query().name == "Invoice "
+
+
 # -- local paths -----------------------------------------------------------
 @pytest.mark.parametrize("cls", FRONTS)
 @pytest.mark.parametrize("name", ["x?.nii", "x#1.nii", "a?b#c.txt"])
@@ -163,8 +196,21 @@ def test_set_storage_options_keeps_the_query_trait() -> None:
     assert PurePath("qkeep://dir/a?b").name == "a?b"
 
 
+def test_fragment_trait_opts_a_scheme_in() -> None:
+    register_protocol("fragon", absolute=True, fragment=True)
+    assert traits_for("fragon").fragment is True
+    assert PurePath("fragon://dir/a.txt#part").name == "a.txt"
+    set_storage_options("fragon", {"k": "v"})
+    assert traits_for("fragon").fragment is True
+
+
 def test_query_trait_defaults_on_and_shows_in_repr() -> None:
     assert ProtocolTraits().query is True
+    assert ProtocolTraits().fragment is False
+    assert traits_for("s3").fragment is False
+    assert traits_for("http").fragment is True
+    assert traits_for("https").fragment is True
+    assert "fragment=True" in repr(ProtocolTraits(fragment=True))
     assert traits_for("an-unregistered-scheme").query is True
     assert traits_for("s3").query is True
     assert PurePath("an-unregistered-scheme://d/x.txt?q=1").name == "x.txt"
@@ -186,6 +232,20 @@ def test_strip_url_query(text: str, bare: str) -> None:
     assert strip_url_query(text) == bare
 
 
+@pytest.mark.parametrize(
+    "text, query, fragment, bare",
+    [
+        ("s3://b/x#a?b", True, False, "s3://b/x#a"),
+        ("s3://b/x#a?b", False, True, "s3://b/x"),
+        ("s3://b/x#a?b", False, False, "s3://b/x#a?b"),
+    ],
+)
+def test_strip_url_query_by_delimiter(
+    text: str, query: bool, fragment: bool, bare: str
+) -> None:
+    assert strip_url_query(text, query=query, fragment=fragment) == bare
+
+
 # -- without_query: the whole path without its query -----------------------
 @pytest.mark.parametrize("cls", FRONTS)
 @pytest.mark.parametrize(
@@ -193,7 +253,7 @@ def test_strip_url_query(text: str, bare: str) -> None:
     [
         ("s3://b/dir/store.zarr?version=2", "s3://b/dir/store.zarr"),
         ("s3://b/dir/x?sig=a/b.zip", "s3://b/dir/x"),
-        ("gs://b/dir/x.nii.gz#part", "gs://b/dir/x.nii.gz"),
+        ("gs://b/dir/x.nii.gz?x=1#part", "gs://b/dir/x.nii.gz"),
         ("memory://dir/x.nii.gz?q=1#f", "memory://dir/x.nii.gz"),
         ("https://h/dir/x.nii.gz?token=1#f", "https://h/dir/x.nii.gz"),
     ],
@@ -326,7 +386,8 @@ def test_local_url_leaves_out_the_query() -> None:
     # local:// is a URL like file://: its query and fragment are not part of
     # the path. What remains is read as fsspec reads it, undecoded.
     assert str(Path("local:///tmp/x?.nii")) == "/tmp/x"
-    assert str(Path("local:///tmp/a%20b#f")) == "/tmp/a%20b"
+    assert str(Path("local:///tmp/a%20b?q=1")) == "/tmp/a%20b"
+    assert str(Path("local:///tmp/Track #2.mp3")) == "/tmp/Track #2.mp3"
     assert str(Path("local://tmp/thing")) == "tmp/thing"
 
 
