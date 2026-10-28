@@ -300,8 +300,10 @@ def test_cloudpathlib_class_lookup() -> None:
 
     try:
         cls = sel._cloudpathlib_class("s3")
-        # May be the class itself or a factory that rewrites an alias.
-        assert type(cls("s3://b/k")).__name__ == "S3Path"
+        assert cls.__name__ == "S3Path"
+        # An aliased, mixed-case scheme is rewritten to the class's prefix.
+        built = sel._build_cloudpathlib("S3A", "S3A://b/k")
+        assert type(built) is cls and str(built) == "s3://b/k"
     except MissingDependenciesError:
         pass  # cloud SDK absent: the intended fail-fast
 

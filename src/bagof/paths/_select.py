@@ -71,7 +71,7 @@ def build(
                 "backend; pass a pre-built Client via driver=, or install "
                 "universal-pathlib"
             )
-        return _cloudpathlib_class(scheme)(text)  # its own errors are kept
+        return _build_cloudpathlib(scheme, text)  # its own errors are kept
     # No backend can build this scheme. Rather than fail outright, fall back to
     # a dependency-free lexical path: it parses and manipulates the URL, and
     # raises a named error with a hint to install a backend on any I/O.
@@ -128,22 +128,21 @@ def _cloudpathlib_impl(scheme: str) -> tx.Any:
     return implementation_registry.get(_cloud_key(scheme))
 
 
-def _cloudpathlib_class(
-    scheme: str,
-) -> tx.Optional[tx.Callable[[str], tx.Any]]:
+def _cloudpathlib_class(scheme: str) -> tx.Optional[type]:
+    """cloudpathlib's path class for a scheme, or None if it has none."""
     impl = _cloudpathlib_impl(scheme)
     if impl is None:
         return None
     # Accessing path_class raises MissingDependenciesError when the cloud SDK
     # is absent; that is the intended fail-fast (the message names the pip
     # extra to install), so it is not caught here.
-    path_class = impl.path_class
-    prefix = path_class.cloud_prefix
+    return impl.path_class
 
-    def factory(text: str) -> tx.Any:
-        # cloudpathlib validates the literal prefix, so rewrite an aliased or
-        # mixed-case scheme (s3a://, ABFS://) to the implementation's own.
-        rest = text.split("://", 1)[1] if "://" in text else text
-        return path_class(prefix + rest)
 
-    return factory
+def _build_cloudpathlib(scheme: str, text: str) -> tx.Any:
+    """Build cloudpathlib's path for a URL of a scheme it implements."""
+    path_class = _cloudpathlib_class(scheme)
+    # cloudpathlib validates the literal prefix, so rewrite an aliased or
+    # mixed-case scheme (s3a://, ABFS://) to the implementation's own.
+    rest = text.split("://", 1)[1] if "://" in text else text
+    return path_class(path_class.cloud_prefix + rest)
