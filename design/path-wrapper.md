@@ -615,6 +615,20 @@ Redesign:
    is out of scope for v1 and is recorded as a non-goal; adding it later
    (e.g. as opt-in mixin composition) is backward-compatible, so we do not
    pay its complexity on speculation.
+5. **A driver of one's own must bring its lexical members [settled, owner]
+   (#21).** The wrapper delegates `name`, `parent`, `with_suffix`, `/`, ...
+   to the driver and does not compute them from the driver's string. A
+   value (`name`, `suffix`) could be parsed safely, but a *path* result must
+   be a driver object of the same kind with the same configuration, and the
+   string does not carry it: measured, rebuilding from the string dropped a
+   universal-pathlib path's `storage_options` and gave a cloudpathlib path a
+   different, default client. Every supported driver implements the lexical
+   members itself (pathlib -- including 3.8, without `with_segments` --
+   universal-pathlib, cloudpathlib, `anyio.Path`, and both of ours), so the
+   case is only a minimal third-party driver or a test double. Those are
+   documented to subclass a path class that has the members, or to provide
+   them and `with_segments`; a test double is better replaced by
+   universal-pathlib's `memory://`.
 
 ---
 
