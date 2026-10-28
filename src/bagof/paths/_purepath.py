@@ -11,18 +11,15 @@ import typing_extensions as tx
 
 from . import _engine as engine
 from . import _match
-from ._constants import LOCAL_PROTOCOLS
 from ._errors import UnsupportedPathOperation
-from ._protocols import strip_url_query
 from ._spec import BY_NAME
 
 
 class PurePathMixin:
     """Lexical path operations, delegated or computed on the canonical path.
 
-    An `http` URL's query and fragment, and the object version in a cloud
-    URL, are not part of the path, so every member here that reads or
-    derives a path runs on the path without them.
+    A URL's query and fragment are not part of its path, so every member
+    here that reads or derives a path runs on the path without them.
     """
 
     # No instance state: keeps the wrappers slotted (no __dict__ leaks in).
@@ -92,33 +89,24 @@ class PurePathMixin:
     def without_query(self) -> tx.Self:
         """The path without its URL query and fragment.
 
-        Reads the URL as a URL, whatever the store: everything from the first
-        `?` or `#` is removed. Use it to name an output after a URL, or to
-        show one, when a token or a version id should not appear.
-
-        `name` already leaves out an `http` URL's query and a cloud URL's
-        object version. In other stores, `s3://` and `gs://` among them, a
-        `?` or `#` can be part of an object's real name: there `name` keeps
-        it, and this path may name a different object. A local path has no
-        query and comes back as it is.
+        The same location with any token or version id removed. `name` and
+        the other members already leave them out; this gives the whole path
+        without them, for instance to show a URL or to build a path from it
+        in another store. A local path has no query and comes back as it
+        is.
 
         ```pycon
         >>> url = PurePath("s3://bucket/dir/store.zarr?version=2")
         >>> url.name
-        'store.zarr?version=2'
+        'store.zarr'
         >>> url.without_query()
         PurePath('s3://bucket/dir/store.zarr')
-        >>> url.without_query().name
-        'store.zarr'
         ```
         """
-        if self.protocol in LOCAL_PROTOCOLS:
+        text = self._query_free_text(str(self._wrapped))
+        if text == str(self._wrapped):
             return self
-        text = str(self._wrapped)
-        bare = strip_url_query(text)
-        if bare == text:
-            return self
-        rebuilt = self._rebuilt(bare)
+        rebuilt = self._rebuilt(text)
         if rebuilt is None:
             raise UnsupportedPathOperation(
                 "without_query",

@@ -32,7 +32,7 @@ ADAPTER_MEMBERS = frozenset(
 )
 
 # Members computed by the wrapper itself, delegated to no driver: matching (see
-# _match.py) and without_query (which reads any remote URL as a URL).
+# _match.py) and without_query.
 COMPUTED_MEMBERS = frozenset({"match", "full_match", "without_query"})
 
 # Driver-specific accessor properties on the base wrapper: present only when

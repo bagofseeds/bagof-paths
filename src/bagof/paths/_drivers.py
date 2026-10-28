@@ -9,10 +9,7 @@ the backends genuinely disagree:
   defaults to `True`), so the wrapper must always pass `recursive=False`;
 - `cloudpathlib` has no recursive `rmdir` at all, but a separate
   `rmtree()`;
-- `pathlib` gained `copy` in 3.14 and `walk` in 3.12;
-- fsspec reads an object version out of an `s3`/`az`/`gs` URL (`?versionId=`
-  and the like) and leaves it out of the key, where `cloudpathlib` keeps it
-  as part of the key.
+- `pathlib` gained `copy` in 3.14 and `walk` in 3.12.
 
 Each such operation lives on an adapter: a `GenericAdapter` that works
 on any (including unknown) driver by duck-typing, and named subclasses that
@@ -32,9 +29,8 @@ import shutil
 
 import typing_extensions as tx
 
-from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
+from ._constants import LOCAL_PROTOCOLS
 from ._errors import UnsupportedPathOperation
-from ._protocols import has_query, strip_url_query
 
 
 def _accepts(func: tx.Any, name: str) -> bool:
@@ -52,18 +48,6 @@ class GenericAdapter:
     where its driver needs different handling. Copy/move perform the
     operation and return nothing -- the wrapper builds the returned path.
     """
-
-    def strip_query(self, wrapped: tx.Any, text: str) -> str:
-        """The URL `text` without what is not part of the path.
-
-        That is the query and the fragment of a scheme that has them (an
-        `http` URL); in any other scheme `?` and `#` are ordinary
-        characters of the key, and `text` is returned as it is.
-        """
-        match = SCHEME_RE.match(text)
-        if match is not None and has_query(match.group(1).lower()):
-            return strip_url_query(text)
-        return text
 
     def _target_is_local(self, wrapper: tx.Any, target: tx.Any) -> bool:
         return wrapper.with_wrapped(target).protocol in LOCAL_PROTOCOLS
@@ -209,85 +193,7 @@ class GenericAdapter:
             yield wrapper, dirnames, filenames
 
 
-# fsspec's object-version selectors. s3fs and adlfs end the key at the first
-# of these markers whether or not the filesystem is version-aware.
-_VERSION_MARKERS = {
-    "s3": "?versionId=", "s3a": "?versionId=",
-    "az": "?versionid=", "abfs": "?versionid=", "abfss": "?versionid=",
-}
-# gcsfs reads a generation from the fragment or the `generation` query
-# parameter, but only when the filesystem is version-aware.
-_GENERATION_SCHEMES = frozenset({"gs", "gcs"})
-
-
-def _gcs_generation(key: str) -> bool:
-    """Whether a gcsfs key names a generation, as gcsfs decides it.
-
-    The fragment wins over the query, and the value must be an integer;
-    otherwise `?` and `#` are characters of the object name.
-    """
-    from urllib.parse import parse_qs
-
-    head, _, fragment = key.partition("#")
-    query = head.partition("?")[2]
-    if fragment:
-        candidate: tx.Optional[str] = fragment
-    else:
-        candidate = parse_qs(query).get("generation", [None])[0]
-    if candidate is None:
-        return False
-    try:
-        int(candidate)
-    except ValueError:
-        return False
-    return True
-
-
-class FsspecAdapter(GenericAdapter):
-    """A driver that reaches its store through fsspec.
-
-    fsspec takes an object version out of the URL rather than out of the
-    key, so the version is not part of the path either.
-    """
-
-    def strip_query(self, wrapped: tx.Any, text: str) -> str:
-        text = super().strip_query(wrapped, text)
-        match = SCHEME_RE.match(text)
-        if match is None:
-            return text
-        scheme = match.group(1).lower()
-        # The key starts after the bucket, which never holds "?" or "#".
-        key_start = text.find("/", match.end())
-        if key_start < 0:
-            return text
-        marker = _VERSION_MARKERS.get(scheme)
-        if marker is not None:
-            cut = text.find(marker, key_start)
-            return text if cut < 0 else text[:cut]
-        if (
-            scheme in _GENERATION_SCHEMES
-            and self._version_aware(wrapped)
-            and _gcs_generation(text[key_start + 1:])
-        ):
-            return strip_url_query(text)
-        return text
-
-    def _version_aware(self, wrapped: tx.Any) -> bool:
-        options = getattr(wrapped, "storage_options", None) or {}
-        return bool(options.get("version_aware", False))
-
-
-class PureCloudAdapter(FsspecAdapter):
-    """The lexical driver: it parses a URL as universal-pathlib would."""
-
-    def _version_aware(self, wrapped: tx.Any) -> bool:
-        # universal-pathlib turns version_aware on when the URL names a
-        # version, unless the caller turned it off.
-        options = getattr(wrapped, "storage_options", None) or {}
-        return bool(options.get("version_aware", True))
-
-
-class UPathAdapter(FsspecAdapter):
+class UPathAdapter(GenericAdapter):
     """universal-pathlib: rmdir recurses by default, copy/move are native."""
 
     def rmdir(self, wrapper: tx.Any, *, recursive: bool) -> None:
@@ -358,12 +264,6 @@ def adapter_for(wrapped: tx.Any) -> GenericAdapter:
 
 
 def _register_known_drivers() -> None:
-    # Our own drivers: neither imports a backend at import time.
-    from ._async_fsspec import AsyncFSPath
-    from ._pure_driver import PureCloudPath
-
-    register_driver(AsyncFSPath, FsspecAdapter())
-    register_driver(PureCloudPath, PureCloudAdapter())
     try:
         from upath import UPath
 

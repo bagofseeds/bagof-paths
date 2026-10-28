@@ -37,9 +37,10 @@ class ProtocolTraits:
         onto this scheme for identity so the spellings compare equal.
     query:
         A `?` in a URL of this scheme starts its query and a `#` its
-        fragment, as in an `http` URL; the path's name, parts and parent
-        leave them out. Off by default: in most stores (`s3`, `gs`,
-        `memory`, ...) `?` and `#` are ordinary characters of a key.
+        fragment, so the path's name, parts and parent leave them out, and a
+        name moves between stores without them. On by default; turn it off
+        for a store whose keys hold `?` or `#` as ordinary characters that
+        must stay in the name.
     driver:
         A preferred factory (a driver class, or a `str -> path` callable)
         used to build a path of this scheme before the availability order.
@@ -61,7 +62,7 @@ class ProtocolTraits:
         bucketed: bool = False,
         absolute: bool = False,
         aliases: tx.Iterable[str] = (),
-        query: bool = False,
+        query: bool = True,
         driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
         storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> None:
@@ -108,7 +109,7 @@ def register_protocol(
     bucketed: bool = False,
     absolute: bool = False,
     aliases: tx.Iterable[str] = (),
-    query: bool = False,
+    query: bool = True,
     driver: tx.Optional[tx.Callable[..., tx.Any]] = None,
     storage_options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> None:
@@ -127,9 +128,9 @@ def register_protocol(
     credentials, ...) forwarded to the driver for every path of this scheme;
     a per-call `storage_options` overrides them key by key.
 
-    `query=True` says a `?` in this scheme's URLs starts a query and a
-    `#` a fragment, as in `http`; by default both are ordinary characters
-    of the path.
+    `query=False` says a `?` or `#` in this scheme's URLs is an ordinary
+    character of the path, kept in its name; by default it starts the
+    query or the fragment, which the name leaves out.
 
     Register at import time -- see the module note on identity.
     """
@@ -252,11 +253,6 @@ def _register_builtin_protocols() -> None:
     )
     # memory is a flat absolute namespace, but not bucketed.
     register_protocol("memory", absolute=True)
-    # An http URL carries a query and a fragment: fsspec's HTTP backend sends
-    # the query and never the fragment, and cloudpathlib's HttpPath leaves
-    # both out of the name.
-    register_protocol("http", query=True)
-    register_protocol("https", query=True)
 
 
 _register_builtin_protocols()

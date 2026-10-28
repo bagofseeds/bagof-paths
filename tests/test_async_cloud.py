@@ -669,36 +669,35 @@ def test_freeze_is_hashable() -> None:
     assert isinstance(hash(token), int)
 
 
-def test_native_driver_keeps_question_mark_in_a_key() -> None:
-    # An unregistered scheme is a flat key space: "?" is part of the key.
+def test_native_driver_leaves_out_the_query() -> None:
     p = AsyncPath("memasync://b/dir/x.nii.gz?v=1")
     assert isinstance(p.wrapped, AsyncFSPath)
-    assert p.name == "x.nii.gz?v=1"
+    assert str(p) == "memasync://b/dir/x.nii.gz?v=1"
+    assert p.name == "x.nii.gz"
+    assert p.suffixes == [".nii", ".gz"]
+    assert str(p.parent) == "memasync://b/dir"
+    assert isinstance(p.parent.wrapped, AsyncFSPath)
 
 
-class _MemQueryFS(_MemAsyncFS):
-    """A natively-async backend for a scheme whose URLs carry a query."""
+class _MemLiteralFS(_MemAsyncFS):
+    """A natively-async backend whose keys hold "?" as a character."""
 
-    protocol = "memquery"
+    protocol = "memliteral"
 
     @classmethod
     def _strip_protocol(cls, path: str) -> str:
-        text = path.replace("memquery://", "memory://")
+        text = path.replace("memliteral://", "memory://")
         return MemoryFileSystem._strip_protocol(text)
 
 
-def test_native_driver_leaves_out_a_url_query() -> None:
+def test_native_driver_honors_query_false() -> None:
     from bagof.paths import register_protocol
 
-    fsspec.register_implementation("memquery", _MemQueryFS, clobber=True)
-    register_protocol("memquery", query=True)
-    p = AsyncPath("memquery://b/dir/x.nii.gz?v=1")
+    fsspec.register_implementation("memliteral", _MemLiteralFS, clobber=True)
+    register_protocol("memliteral", query=False)
+    p = AsyncPath("memliteral://b/dir/x.nii.gz?v=1")
     assert isinstance(p.wrapped, AsyncFSPath)
-    assert str(p) == "memquery://b/dir/x.nii.gz?v=1"
-    assert p.name == "x.nii.gz"
-    assert p.suffixes == [".nii", ".gz"]
-    assert str(p.parent) == "memquery://b/dir"
-    assert isinstance(p.parent.wrapped, AsyncFSPath)
+    assert p.name == "x.nii.gz?v=1"
 
 
 def test_native_driver_leaves_out_an_fsspec_version() -> None:

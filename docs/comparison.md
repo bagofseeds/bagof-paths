@@ -102,12 +102,11 @@ there, on `path.wrapped`.
   even when they come from different libraries. Different spellings of a scheme
   (`s3` and `s3a`, `gs` and `gcs`) count as the same.
 * **A URL's query is not part of its name.** The name, suffix and parent of
-  `https://host/x.nii.gz?token=1` are `x.nii.gz`, `.gz` and
-  `https://host`. So is an object version in a cloud URL, such as
-  `s3://bucket/x.nii.gz?versionId=...`. The path itself keeps both, so a
-  read still sends the token or fetches that version. In a cloud key, any
-  other `?` or `#` is part of the name, as it is for the store;
-  `without_query()` drops it anyway when you want the URL read as a URL.
+  `https://host/x.nii.gz?token=1` or `s3://bucket/x.nii.gz?versionId=...`
+  are `x.nii.gz`, `.gz` and the folder, so a name moves from one store to
+  another without a token or a version riding along. The path itself keeps
+  the query, so a read still sends it. `without_query()` gives the whole
+  path without it.
 * **An `await` version.** `AsyncPath` gives you the same methods as coroutines.
   It runs a blocking library in a background thread, so your event loop keeps
   moving.

@@ -146,10 +146,10 @@ PurePath('/data/sets/train.zip')
 True
 ```
 
-The query of an `http` URL is not part of its name, and neither is the
-version in a cloud URL (`s3://bucket/x.nii.gz?versionId=...`). So a
-presigned or versioned URL still has the right suffix. The path keeps them,
-so a read still sends the token.
+A URL's query and fragment are not part of its name, on any scheme. So a
+presigned or versioned URL still has the right suffix, and its name can name
+a file in another store. The path itself keeps them, so a read still sends
+the token.
 
 ```pycon
 >>> url = PurePath("https://example.org/data/brain.nii.gz?token=abc")
@@ -161,18 +161,8 @@ so a read still sends the token.
 PurePath('https://example.org/data')
 >>> str(url)
 'https://example.org/data/brain.nii.gz?token=abc'
-```
-
-In other cloud stores a `?` can be part of an object's real name, so `name`
-keeps it. To read any URL as a URL, for example to name an output file, use
-`without_query()`:
-
-```pycon
->>> key = PurePath("s3://bucket/data/store.zarr?version=2")
->>> key.name
-'store.zarr?version=2'
->>> key.without_query().name
-'store.zarr'
+>>> url.without_query()
+PurePath('https://example.org/data/brain.nii.gz')
 ```
 
 A `PurePath` and a `Path` to the same place compare equal and hash alike, so
