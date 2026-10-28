@@ -8,6 +8,8 @@ wrapper bridges around a call into it.
 
 from __future__ import annotations
 
+import inspect
+
 import typing_extensions as tx
 
 from ._args import path_arg
@@ -18,6 +20,10 @@ from ._fallbacks import FALLBACKS
 from ._spec import Member
 
 _MISSING = object()
+
+# (driver type, member, the class attribute, keywords) -> whether the
+# driver's method takes those keywords; signatures are read once per type.
+_ACCEPTS: tx.Dict[tx.Tuple[tx.Any, ...], bool] = {}
 
 
 def _raise_unsupported(wrapper: BaseWrapper, name: str) -> tx.NoReturn:
@@ -128,6 +134,10 @@ def _invoke(
     args = coerce_args(member, args)
     method = getattr(wrapper._wrapped, member.name, None)
     if callable(method):
+        if member.keyword_fallback and not accepts(
+            wrapper._wrapped, member.name, kwargs
+        ):
+            return _keyword_fallback(wrapper, member, args, kwargs)
         return _finish(wrapper, method(*args, **kwargs), member.result)
     if member.fallback and _has_needs(wrapper, member):
         synth = FALLBACKS[member.fallback]
@@ -138,3 +148,59 @@ def _invoke(
 def _has_needs(wrapper: BaseWrapper, member: Member) -> bool:
     """Whether every primitive a fallback depends on is itself available."""
     return all(wrapper.supports(name) for name in member.needs)
+
+
+def accepts(
+    driver: tx.Any, name: str, kwargs: tx.Mapping[str, tx.Any]
+) -> bool:
+    """Whether the driver's `name` method takes every keyword in `kwargs`.
+
+    Read from the signature, not by calling and catching `TypeError`, which
+    would also swallow a real error raised inside the method. A signature
+    that cannot be read (a builtin) counts as accepting: the call decides.
+    """
+    if not kwargs:
+        return True
+    keys = frozenset(kwargs)
+    key = (type(driver), name, getattr(type(driver), name, None), keys)
+    try:
+        return _ACCEPTS[key]
+    except KeyError:
+        pass
+    except TypeError:  # an unhashable class attribute: do not cache
+        return _read_accepts(getattr(driver, name), keys)
+    result = _ACCEPTS[key] = _read_accepts(getattr(driver, name), keys)
+    return result
+
+
+def _read_accepts(method: tx.Any, keys: tx.FrozenSet[str]) -> bool:
+    try:
+        params = inspect.signature(method).parameters.values()
+    except (TypeError, ValueError):
+        return True
+    named = set()
+    for param in params:
+        if param.kind is param.VAR_KEYWORD:
+            return True
+        if param.kind in (param.POSITIONAL_OR_KEYWORD, param.KEYWORD_ONLY):
+            named.add(param.name)
+    return keys <= named
+
+
+def keyword_call(member: Member, kwargs: tx.Mapping[str, tx.Any]) -> str:
+    """How a call reads in an error: `is_file(follow_symlinks=False)`."""
+    shown = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
+    return f"{member.name}({shown})"
+
+
+def _keyword_fallback(
+    wrapper: BaseWrapper,
+    member: Member,
+    args: tx.Tuple[tx.Any, ...],
+    kwargs: tx.Mapping[str, tx.Any],
+) -> tx.Any:
+    """A keyword the driver's method lacks: synthesize, else raise."""
+    if member.keyword_fallback and _has_needs(wrapper, member):
+        synth = FALLBACKS[member.keyword_fallback]
+        return _finish(wrapper, synth(wrapper, *args, **kwargs), member.result)
+    _raise_unsupported(wrapper, keyword_call(member, kwargs))

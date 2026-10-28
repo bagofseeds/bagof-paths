@@ -48,6 +48,9 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         The other status checks (`is_file`, `is_dir`, `is_symlink`, ...)
         do the same.
 
+        `follow_symlinks=False` (also on `is_file` and `is_dir`) asks about
+        a symbolic link itself, on every Python version.
+
         ```pycon
         >>> Path("a" * 300).exists()
         False

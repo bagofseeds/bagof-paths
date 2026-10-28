@@ -181,3 +181,5 @@ def test_every_fallback_name_is_registered() -> None:
     for member in MEMBERS:
         if member.fallback is not None:
             assert member.fallback in FALLBACKS, member.name
+        if member.keyword_fallback is not None:
+            assert member.keyword_fallback in FALLBACKS, member.name
