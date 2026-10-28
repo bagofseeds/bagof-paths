@@ -300,7 +300,8 @@ def test_cloudpathlib_class_lookup() -> None:
 
     try:
         cls = sel._cloudpathlib_class("s3")
-        assert cls.__name__ == "S3Path"
+        # May be the class itself or a factory that rewrites an alias.
+        assert type(cls("s3://b/k")).__name__ == "S3Path"
     except MissingDependenciesError:
         pass  # cloud SDK absent: the intended fail-fast
 
@@ -383,7 +384,15 @@ def test_async_constructs_from_url() -> None:
     async def go() -> str:
         return type(AsyncPath("s3://b/k").wrapped).__name__
 
-    assert asyncio.run(go()) == "S3Path"
+    # A natively-async backend (s3fs) gets the native async driver;
+    # otherwise universal-pathlib's driver runs in a thread.
+    try:
+        import s3fs  # noqa: F401
+    except ImportError:
+        expected = "S3Path"
+    else:
+        expected = "AsyncFSPath"
+    assert asyncio.run(go()) == expected
 
 
 def test_preferred_driver_from_register_protocol() -> None:
