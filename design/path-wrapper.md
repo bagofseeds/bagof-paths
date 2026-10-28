@@ -580,11 +580,16 @@ registry.
   (`IsADirectoryError`, before staging and again at commit), never
   replacing it (#45). A failure, a failed commit included, removes the
   staging directory and raises the error itself, not `CommitError` (#46):
-  the caller still holds its data and has no stage to commit again.
-  `staged()` keeps its defaults: a change of type is a new version, and the
-  data is kept, since its caller may have built something costly; a caller
-  that wants it dropped keeps the `Stage` and `discard()`s it on
-  `CommitError`.
+  the caller still holds its data and has no stage to commit again. An
+  `OSError` that names an entry of the staging directory is re-raised
+  naming the target (#47): the caller never saw that directory, and it is
+  gone when the error is read. `staged()` keeps its defaults: a change of
+  type is a new version; the data is kept, since its caller may have built
+  something costly (a caller that wants it dropped keeps the `Stage` and
+  `discard()`s it on `CommitError`); and an error raised while the caller
+  writes at the staged path names that path, which is the one it wrote.
+  Making the staging directory is the exception: the caller has not seen
+  it yet, so a failure there names the target on every stage.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has

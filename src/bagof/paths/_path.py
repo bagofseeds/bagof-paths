@@ -143,9 +143,10 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         see the old content or the new, never a half-written file; leaving
         a `with` block with an error discards it. An appending or `r+`
         mode starts from a copy of the current content. Like the plain
-        `open`, it refuses a directory; if it fails, closing included, it
-        leaves nothing behind and raises the error as the plain `open`
-        would. See [`staged`][bagof.paths.Path.staged].
+        `open`, it refuses a directory and its errors name this path; if it
+        fails, closing included, it leaves nothing behind and raises the
+        error as the plain `open` would. See
+        [`staged`][bagof.paths.Path.staged].
         """
         if atomic:
             copy = _staged.check_atomic_mode(mode)
@@ -157,9 +158,9 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
                     mode, buffering=buffering, encoding=encoding,
                     errors=errors, newline=newline,
                 )
-            except BaseException:
+            except BaseException as error:
                 stage.discard()
-                raise
+                _staged.reraise_naming_target(error, stage)
             return _staged.AtomicFile(handle, stage)
         return engine.invoke(
             self, BY_NAME["open"], (mode,),
@@ -193,11 +194,11 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         With `atomic=True` the new content is written beside the file and
         moved over it in one step, so readers never see a partial file
         (see [`staged`][bagof.paths.Path.staged]). Like the plain write, it
-        refuses a directory; if it fails, it leaves nothing behind and
-        raises the error as the plain write would.
+        refuses a directory and its errors name this path; if it fails, it
+        leaves nothing behind and raises the error as the plain write would.
         """
         if atomic:
-            with _staged.AtomicStage(self) as staged:
+            with _staged.atomic(self) as staged:
                 return staged.write_bytes(data)
         return engine.invoke(self, BY_NAME["write_bytes"], (data,))
 
@@ -216,7 +217,7 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         [`write_bytes`][bagof.paths.Path.write_bytes].
         """
         if atomic:
-            with _staged.AtomicStage(self) as staged:
+            with _staged.atomic(self) as staged:
                 return staged.write_text(
                     data, encoding=encoding, errors=errors, newline=newline
                 )
@@ -301,6 +302,11 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
           The `atomic=True` writers always drop it, and raise the error
           itself: their caller still holds the data. They also refuse a
           directory at this path, as the plain writers do.
+
+        An error raised while your code writes at the staged path names the
+        staged path, since that is the path it wrote. The `atomic=True`
+        writers name this path instead: their caller never sees the
+        staging area.
 
         The staging area is a hidden directory beside this path (beside the
         file a symbolic link names), so the move stays on one file system; a
