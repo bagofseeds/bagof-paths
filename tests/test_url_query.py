@@ -395,3 +395,35 @@ def test_local_url_keeps_question_mark_and_hash() -> None:
     # follows the scheme literally.
     assert str(Path("local:///tmp/x?.nii")) == "/tmp/x?.nii"
     assert Path("local:///tmp/x#1").name == "x#1"
+
+
+_FILE_URIS = [
+    "file:///tmp/x?.nii", "file:///tmp/x.nii?q=1#f", "file:///tmp/x%3F.nii",
+    "file://localhost/tmp/x", "FILE:///tmp/x", "file:/tmp/x",
+    "file:///tmp/a%20b", "file://elsewhere/share/x", "file:rel", "/tmp/x",
+    "file:///tmp/%C3%A9", "file:///tmp/%FF", "file:////tmp/x", "file://",
+    "file:///", "file:///tmp/x#", "file:///tmp/a;b", "file:///tmp/a%2Fb",
+    "file:", "http://h/x",
+]
+
+
+@pytest.mark.skipif(
+    __import__("sys").version_info < (3, 14),
+    reason="the reference is Python 3.14's Path.from_uri",
+)
+@pytest.mark.parametrize("uri", _FILE_URIS)
+def test_file_uri_matches_python_314_from_uri(uri: str) -> None:
+    import pathlib
+
+    from bagof.paths._base import _local_from_file_uri
+
+    def read(func: object) -> str:
+        try:
+            return str(func(uri))
+        except ValueError as error:
+            return f"ValueError: {error}"
+
+    assert read(_local_from_file_uri) == read(pathlib.Path.from_uri) or (
+        read(_local_from_file_uri).startswith("ValueError")
+        and read(pathlib.Path.from_uri).startswith("ValueError")
+    )
