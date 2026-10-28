@@ -27,7 +27,7 @@ from pathlib import Path as LocalPath
 
 import typing_extensions as tx
 
-from . import _select
+from . import _drivers, _select
 from ._constants import (
     ACCESSOR_MEMBERS,
     ADAPTER_MEMBERS,
@@ -37,13 +37,7 @@ from ._constants import (
 )
 from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
-from ._protocols import (
-    canonical_scheme,
-    has_query,
-    merged_storage_options,
-    strip_query,
-    traits_for,
-)
+from ._protocols import canonical_scheme, merged_storage_options, traits_for
 from ._spec import BY_NAME
 
 _MISSING = object()
@@ -270,19 +264,21 @@ class BaseWrapper:
 
     # -- the path without its URL query -----------------------------------
     def _query_free(self) -> tx.Self:
-        """This path without its URL query and fragment.
+        """This path without the part of its URL that is not the path.
 
-        The lexical members run on this view: a query (a token, a version id)
-        and a fragment are not part of the path, so they are not part of its
-        name, its parts or its parent. The path itself keeps them, since I/O
-        may need them to reach the object. A derived path does not carry them,
-        as in URL resolution (RFC 3986): it names a different object.
+        That is an `http` URL's query and fragment, or the object version
+        fsspec reads out of an `s3`/`az`/`gs` URL; the driver adapter
+        decides, since backends disagree. The lexical members run on this
+        view, so neither is part of the name, the parts or the parent. The
+        path itself keeps them, since I/O needs them to reach the object. A
+        derived path does not carry them, as in URL resolution (RFC 3986):
+        it names a different object.
         """
         wrapped = self._wrapped
-        if not has_query(self.protocol):
+        if self.protocol in LOCAL_PROTOCOLS:
             return self
         text = str(wrapped)
-        bare = strip_query(text)
+        bare = _drivers.adapter_for(wrapped).strip_query(wrapped, text)
         rebuild = getattr(wrapped, "with_segments", None)
         if bare == text or not callable(rebuild):
             # A driver that cannot rebuild itself from a string keeps its own
@@ -295,9 +291,8 @@ class BaseWrapper:
         if isinstance(other, BaseWrapper):
             return other._query_free()
         if isinstance(other, str):
-            match = SCHEME_RE.match(other)
-            if match and has_query(match.group(1).lower()):
-                return strip_query(other)
+            wrapped = self._wrapped
+            return _drivers.adapter_for(wrapped).strip_query(wrapped, other)
         return other
 
     # -- location (generic; refined per-driver by the adapter layer) --------

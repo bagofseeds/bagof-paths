@@ -106,6 +106,19 @@ def _strip(scheme: str, url: str) -> str:
         return url.split("://", 1)[1] if "://" in url else url
 
 
+def _url_options(scheme: str, url: str) -> tx.Dict[str, tx.Any]:
+    """The storage options a backend reads out of a URL.
+
+    fsspec's `_get_kwargs_from_urls`, which `fsspec.filesystem` does not
+    apply by itself: s3fs, adlfs and gcsfs turn `version_aware` on here
+    when the URL names an object version.
+    """
+    try:
+        return dict(_filesystem_class(scheme)._get_kwargs_from_urls(url))
+    except Exception:  # pragma: no cover - exotic backend without the hook
+        return {}
+
+
 def _sweep_closed_loops() -> None:
     """Drop cache entries whose loop has closed.
 
@@ -274,8 +287,15 @@ class AsyncFSPath:
         scheme: str,
         options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
     ) -> AsyncFSPath:
-        """Build a path from a full URL, stripping it to the fs path."""
-        return cls(scheme, _strip(scheme, url), options)
+        """Build a path from a full URL, stripping it to the fs path.
+
+        The options the backend reads out of the URL itself (`version_aware`
+        for an s3 `?versionId=`, ...) come first and the caller's on top,
+        as universal-pathlib does, so both drivers reach the same version.
+        """
+        merged = dict(_url_options(scheme, url))
+        merged.update(options or {})
+        return cls(scheme, _strip(scheme, url), merged)
 
     # -- identity / display -------------------------------------------------
     @property

@@ -669,13 +669,70 @@ def test_freeze_is_hashable() -> None:
     assert isinstance(hash(token), int)
 
 
-def test_native_driver_leaves_out_the_query() -> None:
-    # The native async driver keeps the query in its path, for I/O, and the
-    # lexical members leave it out, as on every other driver.
+def test_native_driver_keeps_question_mark_in_a_key() -> None:
+    # An unregistered scheme is a flat key space: "?" is part of the key.
     p = AsyncPath("memasync://b/dir/x.nii.gz?v=1")
     assert isinstance(p.wrapped, AsyncFSPath)
-    assert str(p) == "memasync://b/dir/x.nii.gz?v=1"
+    assert p.name == "x.nii.gz?v=1"
+
+
+class _MemQueryFS(_MemAsyncFS):
+    """A natively-async backend for a scheme whose URLs carry a query."""
+
+    protocol = "memquery"
+
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        text = path.replace("memquery://", "memory://")
+        return MemoryFileSystem._strip_protocol(text)
+
+
+def test_native_driver_leaves_out_a_url_query() -> None:
+    from bagof.paths import register_protocol
+
+    fsspec.register_implementation("memquery", _MemQueryFS, clobber=True)
+    register_protocol("memquery", query=True)
+    p = AsyncPath("memquery://b/dir/x.nii.gz?v=1")
+    assert isinstance(p.wrapped, AsyncFSPath)
+    assert str(p) == "memquery://b/dir/x.nii.gz?v=1"
     assert p.name == "x.nii.gz"
     assert p.suffixes == [".nii", ".gz"]
-    assert str(p.parent) == "memasync://b/dir"
+    assert str(p.parent) == "memquery://b/dir"
     assert isinstance(p.parent.wrapped, AsyncFSPath)
+
+
+def test_native_driver_leaves_out_an_fsspec_version() -> None:
+    # Built directly, so no s3fs is needed: the lexical members never reach
+    # the backend.
+    p = AsyncPath(AsyncFSPath("s3", "b/dir/x.nii.gz?versionId=1"))
+    assert p.name == "x.nii.gz"
+    assert str(p.parent) == "s3://b/dir"
+    assert isinstance(p.parent.wrapped, AsyncFSPath)
+
+
+class _MemVersionFS(_MemAsyncFS):
+    """A backend that, like s3fs, reads version_aware out of a URL."""
+
+    protocol = "memversion"
+
+    @classmethod
+    def _get_kwargs_from_urls(cls, path: str) -> dict:
+        return {"version_aware": True} if "?versionId=" in path else {}
+
+
+fsspec.register_implementation("memversion", _MemVersionFS, clobber=True)
+
+
+def test_native_driver_reads_options_from_the_url() -> None:
+    # fsspec.filesystem() does not apply _get_kwargs_from_urls by itself;
+    # without it an s3 "?versionId=" URL would read the latest version, where
+    # universal-pathlib reads the one named.
+    p = AsyncPath("memversion://b/x?versionId=1")
+    assert p.wrapped.storage_options == {"version_aware": True}
+    assert AsyncPath("memversion://b/x").wrapped.storage_options == {}
+    # The caller's options win over what the URL implies.
+    q = AsyncPath(
+        "memversion://b/x?versionId=1",
+        storage_options={"version_aware": False},
+    )
+    assert q.wrapped.storage_options == {"version_aware": False}

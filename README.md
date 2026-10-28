@@ -146,9 +146,10 @@ PurePath('/data/sets/train.zip')
 True
 ```
 
-A URL's query and fragment are not part of its name, so a presigned or
-versioned URL still has the right suffix. The path keeps them, so a read
-still sends the token.
+The query of an `http` URL is not part of its name, and neither is the
+version in a cloud URL (`s3://bucket/x.nii.gz?versionId=...`). So a
+presigned or versioned URL still has the right suffix. The path keeps them,
+so a read still sends the token.
 
 ```pycon
 >>> url = PurePath("https://example.org/data/brain.nii.gz?token=abc")

@@ -103,8 +103,10 @@ there, on `path.wrapped`.
   (`s3` and `s3a`, `gs` and `gcs`) count as the same.
 * **A URL's query is not part of its name.** The name, suffix and parent of
   `https://host/x.nii.gz?token=1` are `x.nii.gz`, `.gz` and
-  `https://host`. The path itself keeps the query, so a read still sends
-  the token.
+  `https://host`. So is an object version in a cloud URL, such as
+  `s3://bucket/x.nii.gz?versionId=...`. The path itself keeps both, so a
+  read still sends the token or fetches that version. In a cloud key, any
+  other `?` or `#` is part of the name, as it is for the store.
 * **An `await` version.** `AsyncPath` gives you the same methods as coroutines.
   It runs a blocking library in a background thread, so your event loop keeps
   moving.

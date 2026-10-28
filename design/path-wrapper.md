@@ -379,22 +379,47 @@ registry.
     real paths and differs only for these pathological spellings. Reproducing
     the raw form lexically is not possible without re-implementing each
     backend's `_strip_protocol`, so this is a documented residual divergence.
-- **A URL's query and fragment [settled].** Every neighbour treats them as
-  part of the last segment (measured: universal-pathlib 0.3.10,
-  cloudpathlib 0.26.0 via `LocalS3Path`, and the lexical driver all give
-  `name == 'x.nii.gz?token=1'`; a `/` inside the query is taken as a
-  separator). The wrapper follows RFC 3986 instead: the lexical members
-  (`name`/`stem`/`suffix(es)`/`parts`/`parent(s)`, `match`/`full_match`,
-  `relative_to`) run on the path without the query and the fragment. The
-  string, the `path`, the identity key and every I/O call keep them, since
-  they may be what reaches the object (a presigned token; universal-pathlib's
-  S3 `?versionId=`, which turns `version_aware` on). A derived path
-  (`parent`, `with_*`, `/`, `joinpath`) drops them, as `urljoin` does: it
-  names a different object. A local path has no query, so `?`/`#` stay
-  ordinary characters there. A scheme whose keys hold `?`/`#` literally opts
-  out with the `query=False` protocol trait. The query-free view is rebuilt
-  through the driver's own `with_segments`, so its configuration (storage
-  options, a client) rides along; a driver without one keeps its own answer.
+- **The part of a URL that is not the path [settled].** Measured against
+  universal-pathlib 0.3.10, cloudpathlib 0.26.0, fsspec/s3fs 2026.9.0,
+  gcsfs 2026.10.1 and adlfs 2026.8.0, by the key or request each backend's
+  I/O actually addresses:
+
+  | URL | fsspec I/O addresses | cloudpathlib | UPath `name` | **wrapper `name`** |
+  |---|---|---|---|---|
+  | `https://h/d/x.gz?t=1#f` | sends `/d/x.gz?t=1`, never the fragment | `HttpPath.name == 'x.gz'` | `'x.gz?t=1#f'` | `'x.gz'` |
+  | `https://h/d/x.gz?s=a/b.zip` | sends the query whole | `'x.gz'` | `'b.zip'` | `'x.gz'` |
+  | `s3://b/d/x.gz?versionId=v` | key `d/x.gz`, version `v` | key `d/x.gz?versionId=v` | `'x.gz?versionId=v'` | `'x.gz'` (fsspec drivers); the key (cloudpathlib) |
+  | `s3://b/d/x?version=2`, `s3://b/d/x#f` | key `d/x?version=2`, `d/x#f` | same key | same | same |
+  | `s3://b/d/x?s=a/b.zip` | key `d/x?s=a/b.zip` (name `b.zip`) | same | `'b.zip'` | `'b.zip'` |
+  | `gs://b/d/x.gz#123`, `?generation=123` | key `d/x.gz`, generation 123 (version-aware, which UPath turns on) | key `d/x.gz#123` | `'x.gz#123'` | `'x.gz'` (fsspec drivers) |
+  | `gs://b/d/x#part`, `gs://b/d/x?x=1` | key as written | same | same | same |
+  | `az://c/d/x.gz?versionid=v` | key `d/x.gz`, version `v` | (needs credentials) | `'x.gz?versionid=v'` | `'x.gz'` |
+  | `memory://d/x?q=1#f`, `zip://`, ... | key as written | — | same | same |
+
+  So the rule is per scheme *and* per backend, not RFC 3986 everywhere. An
+  `http(s)` URL has a query and a fragment (the `query=True` protocol trait,
+  set for `http`/`https`; a downstream scheme opts in the same way). In every
+  other scheme `?` and `#` are characters of the key -- the fsspec default --
+  except the object version fsspec reads out of an `s3`/`az`/`gs` URL. That
+  exception belongs to the fsspec family of drivers (UPath, the native async
+  driver, and the lexical driver, which parses as UPath does), so it lives on
+  `FsspecAdapter.strip_query`; cloudpathlib keeps the version in its key, so
+  over cloudpathlib the name keeps it too. The issue that prompted this (#17)
+  expected `s3://bucket/dir/store.zarr?version=2` to be named `store.zarr`;
+  every backend reads the key `dir/store.zarr?version=2`, so it is not.
+
+  The lexical members (`name`/`stem`/`suffix(es)`/`parts`/`parent(s)`,
+  `match`/`full_match`, `relative_to`) run on the path without that part. The
+  string, `path`, the identity key and every I/O call keep it. A derived path
+  (`parent`, `with_*`, `/`, `joinpath`) drops it, as `urljoin` and
+  cloudpathlib's `HttpPath` do: it names a different object. The query-free
+  view is rebuilt through the driver's own `with_segments`, so its
+  configuration rides along; a driver without one keeps its own answer.
+
+  Measuring this also showed the native async driver building its filesystem
+  without fsspec's `_get_kwargs_from_urls`, so `AsyncPath("s3://...?versionId=v")`
+  read the *latest* version where `Path` read `v`; it now merges those options
+  under the caller's, as UPath does.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/

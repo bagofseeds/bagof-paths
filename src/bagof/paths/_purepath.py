@@ -17,8 +17,9 @@ from ._spec import BY_NAME
 class PurePathMixin:
     """Lexical path operations, delegated or computed on the canonical path.
 
-    A URL's query and fragment are not part of its path, so every member
-    here that reads or derives a path runs on the path without them.
+    An `http` URL's query and fragment, and the object version in a cloud
+    URL, are not part of the path, so every member here that reads or
+    derives a path runs on the path without them.
     """
 
     # No instance state: keeps the wrappers slotted (no __dict__ leaks in).
