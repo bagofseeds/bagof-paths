@@ -6,6 +6,7 @@ own in-memory filesystem, and drive ``AsyncPath`` against it end to end.
 """
 
 import asyncio
+import sys
 
 import pytest
 
@@ -846,6 +847,18 @@ def test_scheme_keeping_backend_query_and_relative_to() -> None:
     assert not p.is_relative_to("memurl://other/dir")
     with pytest.raises(ValueError):
         p.relative_to("memurl://other/dir")
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="walk_up needs Python 3.12"
+)
+def test_scheme_keeping_backend_relative_to_walk_up() -> None:
+    p = AsyncPath("memurl://h/dir/x.txt")
+    assert str(p.relative_to("memurl://h/other", walk_up=True)) == (
+        "../dir/x.txt"
+    )
+    with pytest.raises(ValueError):
+        p.relative_to("memurl://other/dir", walk_up=True)
 
 
 def test_scheme_keeping_backend_io() -> None:
