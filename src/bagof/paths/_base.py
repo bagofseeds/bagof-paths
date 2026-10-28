@@ -469,6 +469,24 @@ class BaseWrapper:
         """
         return self.protocol in LOCAL_PROTOCOLS
 
+    def _names_same_file(self, other: tx.Any) -> bool:
+        """`samefile(other, strict=False)`: blocking, for both front-ends.
+
+        Two local names lead to the same file when they resolve to it, or,
+        where it does not exist yet, to the same existing directory and the
+        same names below it. Two remote paths name the same object when they
+        are equal. A local path and a remote one never do.
+        """
+        from ._pure import PurePath
+
+        if not isinstance(other, BaseWrapper):
+            other = PurePath(path_arg(other))
+        if self.is_local() and other.is_local():
+            return _local_identity(os.fspath(self)) == _local_identity(
+                os.fspath(other)
+            )
+        return self._key() == other._key()
+
     # -- driver-specific accessors -----------------------------------------
     # Metadata and handles a particular driver exposes. Each delegates to the
     # wrapped object and raises UnsupportedPathOperation when it is absent, so
@@ -853,6 +871,30 @@ def _local_flavour(wrapped: tx.Any) -> tx.Type[pathlib.PurePath]:
     if os.name == "nt":  # pragma: no cover - exercised on Windows only
         return pathlib.PureWindowsPath
     return pathlib.PurePosixPath
+
+
+def _local_identity(name: str) -> tx.Tuple[tx.Any, ...]:
+    """The file a local name leads to, whether or not it exists yet.
+
+    Symbolic links and `.`/`..` are resolved; the result is the device and
+    inode of the file, or of its nearest existing ancestor followed by the
+    names below it, so a hard link or another spelling of a directory leads
+    to the same identity.
+    """
+    head = os.path.realpath(name)
+    rest: tx.List[str] = []
+    while True:
+        try:
+            info = os.stat(head)
+        except OSError:
+            parent, tail = os.path.split(head)
+            if parent == head:  # pragma: no cover - the root always exists
+                break
+            rest.append(os.path.normcase(tail))
+            head = parent
+            continue
+        return (info.st_dev, info.st_ino, tuple(reversed(rest)))
+    return (head, tuple(reversed(rest)))  # pragma: no cover
 
 
 def _is_path_shaped(obj: tx.Any) -> bool:

@@ -96,8 +96,35 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """Like `stat`, without following symbolic links."""
         return engine.invoke(self, BY_NAME["lstat"])
 
-    def samefile(self, other: tx.Any) -> bool:
-        """Whether the path and `other` refer to the same file."""
+    def samefile(self, other: tx.Any, *, strict: bool = True) -> bool:
+        """Whether the path and `other` refer to the same file.
+
+        As in `pathlib`, both files must exist. With `strict=False` they
+        need not: the answer is whether writing one would write the other,
+        which is what a writer checks before it replaces the file it reads.
+
+        ```pycon
+        >>> import tempfile
+        >>> from bagof.paths import Path
+        >>> folder = Path(tempfile.mkdtemp())
+        >>> (folder / "sub").mkdir()
+        >>> new = folder / "new.bin"
+        >>> new.samefile(folder / "sub" / ".." / "new.bin", strict=False)
+        True
+        >>> new.samefile(folder / "other.bin", strict=False)
+        False
+        ```
+
+        A local path resolves symbolic links and `..`, and a hard link to an
+        existing file is the same file. A name that does not exist yet
+        compares as it is written below its nearest existing directory, so
+        on a case-insensitive file system (macOS) two spellings of a new
+        name count as different. A remote path is the same file as another
+        remote path when the two are equal, and never the same as a local
+        one.
+        """
+        if not strict:
+            return self._names_same_file(other)
         return engine.invoke(self, BY_NAME["samefile"], (other,))
 
     # -- extended status queries -------------------------------------------

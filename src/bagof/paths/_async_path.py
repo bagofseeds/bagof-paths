@@ -431,8 +431,14 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """Like `stat`, without following symbolic links."""
         return await self._call("lstat")
 
-    async def samefile(self, other: tx.Any) -> bool:
-        """Whether the path and `other` refer to the same file."""
+    async def samefile(self, other: tx.Any, *, strict: bool = True) -> bool:
+        """Whether the path and `other` refer to the same file.
+
+        `strict=False` works as in
+        [`Path.samefile`][bagof.paths.Path.samefile].
+        """
+        if not strict:
+            return await bridge.run(self._names_same_file, other)
         return await self._call("samefile", (other,))
 
     # -- extended status queries -------------------------------------------
