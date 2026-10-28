@@ -41,20 +41,16 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
     def exists(self, *, follow_symlinks: bool = True) -> bool:
         """Whether the path exists.
 
-        As with `pathlib`, an error other than "not found" propagates.
-        In particular, a name too long for the file system raises
-        `OSError` (`ENAMETOOLONG`), where `os.path.exists` would return
-        `False`. To treat such a name as missing, catch it:
+        On a local path this follows Python 3.14 on every version: an
+        error returns False rather than raising. A name too long for the
+        file system is not there, and neither is one whose parent you may
+        not search. To see the error, call `stat()`, which still raises.
+        The other status checks (`is_file`, `is_dir`, `is_symlink`, ...)
+        do the same.
 
-        ```python
-        import errno
-
-        try:
-            found = path.exists()
-        except OSError as e:
-            if e.errno != errno.ENAMETOOLONG:
-                raise
-            found = False
+        ```pycon
+        >>> Path("a" * 300).exists()
+        False
         ```
         """
         return engine.invoke(
@@ -63,14 +59,20 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         )
 
     def is_file(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path is a regular file."""
+        """Whether the path is a regular file.
+
+        Like `exists`, it returns False on an error on a local path.
+        """
         return engine.invoke(
             self, BY_NAME["is_file"], (),
             {"follow_symlinks": follow_symlinks},
         )
 
     def is_dir(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path is a directory."""
+        """Whether the path is a directory.
+
+        Like `exists`, it returns False on an error on a local path.
+        """
         return engine.invoke(
             self, BY_NAME["is_dir"], (),
             {"follow_symlinks": follow_symlinks},
