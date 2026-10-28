@@ -505,3 +505,25 @@ def test_same_store_folds_aliases_and_local() -> None:
                           .wrapped)
     assert not s3._same_store(pathlib.Path("/tmp"))
     assert Path("/tmp/x")._same_store(pathlib.Path("/elsewhere"))
+
+
+# -- small paths through the rule ------------------------------------------
+def test_backendless_with_segments_reads_parts_as_this_scheme() -> None:
+    # As universal-pathlib does: scheme-less segments name a location of
+    # this scheme (bucket first).
+    p = PurePath("s3://b/k?v=1")
+    assert str(p.with_segments("a", "b.txt")) == "s3://a/b.txt"
+    assert str(p.with_segments("gs://c/d")) == "gs://c/d"
+
+
+def test_relative_to_takes_a_driver_object_as_it_is() -> None:
+    p = PurePath("/data/sets/x.nii")
+    assert str(p.relative_to(pathlib.PurePosixPath("/data"))) == "sets/x.nii"
+
+
+def test_path_part_leaves_a_local_url_alone() -> None:
+    from bagof.paths._protocols import path_part
+
+    assert path_part("file:///tmp/x?.nii") == "file:///tmp/x?.nii"
+    assert path_part("/tmp/x?.nii") == "/tmp/x?.nii"
+    assert path_part("s3://b/x?v=1") == "s3://b/x"
