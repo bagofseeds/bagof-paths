@@ -224,9 +224,41 @@ PurePath('https://example.org/data')
 PurePath('https://example.org/data/brain.nii.gz')
 ```
 
-A `PurePath` and a `Path` to the same place compare equal and hash alike, so
-either one looks the other up in a set or a dictionary. This mirrors
-`pathlib`, where a `PurePath` equals the `Path` beside it.
+## Comparing paths
+
+Two paths are equal when they point to the same place. This holds across
+`PurePath`, `Path` and `AsyncPath`, and against a path you did not wrap: a
+`pathlib` path, a `UPath`, a `CloudPath`, or any `os.PathLike`.
+
+```pycon
+>>> import pathlib
+>>> from bagof.paths import Path, PurePath
+>>> Path("/data/scan.nii") == pathlib.Path("/data/scan.nii")
+True
+>>> pathlib.Path("/data/scan.nii") == PurePath("/data/scan.nii")
+True
+>>> pathlib.Path("/data/scan.nii") in {Path("/data/scan.nii")}
+True
+>>> Path("/data/scan.nii") == "/data/scan.nii"
+False
+```
+
+A local path hashes like the `pathlib` path, so the two mix in a set or a
+dictionary. A string never equals a path, as in `pathlib`.
+
+Equality compares the location only. Two paths to the same object are equal
+even when they carry different connection options, which `UPath` would count
+as a difference.
+
+Some paths are equal but hash differently, so one does not find the other in
+a set:
+
+* a `CloudPath` (cloudpathlib hashes its class name with the URL; it also
+  answers `False` when it is on the left of `==`, so write the wrapper first);
+* a `UPath` spelled with a scheme alias, such as `UPath("s3a://b/k")`
+  (universal-pathlib hashes the scheme as it is written).
+
+Wrap such a path first -- `Path(cloud_path)` -- to use it as a key.
 
 ## Learn more
 

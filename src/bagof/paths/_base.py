@@ -23,12 +23,13 @@ from __future__ import annotations
 
 import copy
 import os
+import pathlib
 from pathlib import Path as LocalPath
 
 import typing_extensions as tx
 
 from . import _select
-from ._args import is_url, path_arg
+from ._args import is_driver, is_url, path_arg
 from ._constants import (
     ACCESSOR_MEMBERS,
     ADAPTER_MEMBERS,
@@ -57,8 +58,9 @@ class BaseWrapper:
 
     __slots__ = ("_wrapped",)
 
-    # Which front-end family this wrapper belongs to. Only wrappers of the
-    # same family compare equal (a sync Path never equals an async one).
+    # Which front-end family this wrapper belongs to: whether its I/O
+    # methods are synchronous or coroutines. It does not enter identity --
+    # a Path and an AsyncPath at the same location compare equal.
     _family: tx.ClassVar[str] = "sync"
 
     def __init__(
@@ -540,27 +542,92 @@ class BaseWrapper:
         return self._delegate_attr("etag")
 
     # -- identity -----------------------------------------------------------
-    def _key(self) -> tx.Tuple[str, str]:
-        # Driver-independent: two wrappers of the same family pointing at the
-        # same location are equal regardless of which driver backs them.
-        # Built from the canonical properties, not raw str(wrapped), so every
-        # adapter refinement to protocol/path repairs identity automatically.
+    def _key(self) -> tx.Tuple[tx.Any, ...]:
+        # Driver-independent: two paths pointing at the same location are
+        # equal regardless of which driver -- or which front-end -- backs
+        # them. Built from the canonical properties, not raw str(wrapped), so
+        # every adapter refinement to protocol/path repairs identity.
         protocol = self.protocol
         if protocol in LOCAL_PROTOCOLS:
-            protocol = ""
-        else:
-            # Fold scheme aliases (s3/s3a, gs/gcs) to their canonical name, so
-            # two spellings of the same store compare and hash equal.
-            protocol = canonical_scheme(protocol)
-        return (protocol, self.path)
+            # A local path also carries its flavour, as pathlib's identity
+            # does: a POSIX path never equals a Windows one, and the hash
+            # below is the flavour's own.
+            return ("", self.path, _local_flavour(self._wrapped))
+        # Fold scheme aliases (s3/s3a, gs/gcs) to their canonical name, so
+        # two spellings of the same store compare and hash equal.
+        return (canonical_scheme(protocol), self.path)
+
+    def _foreign_key(
+        self, other: tx.Any
+    ) -> tx.Optional[tx.Tuple[tx.Any, ...]]:
+        """The identity of an unwrapped path `other`, or `None`.
+
+        A driver object (a `pathlib` path, a `UPath`, a `CloudPath`, an
+        `anyio.Path`, ...) is read through the same location properties as
+        a wrapper; a plain `os.PathLike` is read as the local name
+        `os.fspath` gives. A string is never a path, and anything else is
+        not comparable.
+        """
+        if isinstance(other, (str, bytes, bytearray, memoryview)):
+            return None
+        if not is_driver(other):
+            if not hasattr(type(other), "__fspath__"):
+                return None
+            try:
+                text = os.fspath(other)
+            except TypeError:
+                return None
+            if not isinstance(text, str):
+                return None
+            other = pathlib.PurePath(text)
+        try:
+            return self.with_wrapped(other)._key()
+        except (TypeError, ValueError):
+            return None
 
     def __eq__(self, other: tx.Any) -> bool:
-        if isinstance(other, BaseWrapper) and self._family == other._family:
+        """Whether `other` names the same location.
+
+        Any path compares by where it points, whatever its type: another
+        wrapper (`Path`, `PurePath`, `AsyncPath`), a `pathlib` path, a
+        `UPath`, a `CloudPath`, or any [os.PathLike][]. A string never
+        equals a path.
+
+        ```pycon
+        >>> import pathlib
+        >>> Path("/data/scan.nii") == pathlib.Path("/data/scan.nii")
+        True
+        >>> pathlib.Path("/data/scan.nii") == Path("/data/scan.nii")
+        True
+        >>> Path("/data/scan.nii") == "/data/scan.nii"
+        False
+        ```
+
+        Only the location counts: two paths to the same place are equal
+        even when they carry different connection options.
+        """
+        if isinstance(other, BaseWrapper):
             return self._key() == other._key()
-        return NotImplemented
+        key = self._foreign_key(other)
+        if key is None:
+            return NotImplemented
+        return self._key() == key
 
     def __hash__(self) -> int:
-        return hash(self._key())
+        """A hash that agrees with equality.
+
+        A local path hashes as the `pathlib` path at the same location, so a
+        wrapper finds the `pathlib` path in a set or a dictionary, and the
+        other way round. A remote path hashes as a universal-pathlib path at
+        the same URL (for its canonical scheme). A cloudpathlib path, or a
+        universal-pathlib path spelled with a scheme alias (`s3a://`),
+        compares equal but hashes differently, so it does not find its
+        wrapper in a set.
+        """
+        key = self._key()
+        if not key[0]:
+            return hash(key[2](key[1]))
+        return hash(key)
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({str(self._wrapped)!r})"
@@ -727,6 +794,21 @@ def _hostname() -> tx.Optional[str]:
         return socket.gethostname()
     except (OSError, AttributeError):  # pragma: no cover - no hostname
         return None
+
+
+def _local_flavour(wrapped: tx.Any) -> tx.Type[pathlib.PurePath]:
+    """The `pathlib` flavour of a local path: Windows or POSIX.
+
+    A `pathlib` path has its own; any other local driver (`anyio.Path`, a
+    local `UPath`) follows the running platform, as `pathlib.Path` does.
+    """
+    if isinstance(wrapped, pathlib.PureWindowsPath):
+        return pathlib.PureWindowsPath
+    if isinstance(wrapped, pathlib.PurePosixPath):
+        return pathlib.PurePosixPath
+    if os.name == "nt":  # pragma: no cover - exercised on Windows only
+        return pathlib.PureWindowsPath
+    return pathlib.PurePosixPath
 
 
 def _is_path_shaped(obj: tx.Any) -> bool:

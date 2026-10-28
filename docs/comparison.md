@@ -106,7 +106,10 @@ there, on `path.wrapped`.
   tree unless you ask for that.
 * **Paths compare by where they point.** Two paths to the same place are equal
   even when they come from different libraries. Different spellings of a scheme
-  (`s3` and `s3a`, `gs` and `gcs`) count as the same.
+  (`s3` and `s3a`, `gs` and `gcs`) count as the same. A path also equals the
+  `pathlib` path, `UPath` or `CloudPath` it was made from, and a local one
+  hashes like the `pathlib` path, so the two mix in a set or a dictionary.
+  A string is never equal to a path.
 * **A URL's query is not part of its name.** The name, suffix and parent of
   `https://host/x.nii.gz?token=1` or `s3://bucket/x.nii.gz?versionId=...`
   are `x.nii.gz`, `.gz` and the folder, so a name moves from one store to

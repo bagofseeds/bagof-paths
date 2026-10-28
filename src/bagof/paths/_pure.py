@@ -49,10 +49,12 @@ class PurePath(PurePathMixin, BaseWrapper):
     '.zarr'
     ```
 
-    A `PurePath` and a [`Path`][bagof.paths.Path] for the same location compare
-    equal and hash alike, so one serves to look the other up in a set or a
+    A `PurePath`, a [`Path`][bagof.paths.Path] and an
+    [`AsyncPath`][bagof.paths.AsyncPath] for the same location compare equal
+    and hash alike, so one serves to look another up in a set or a
     dictionary. This mirrors [`pathlib`][pathlib], where a pure path equals
-    the full path beside it.
+    the full path beside it. A local one also equals, and hashes like, the
+    `pathlib` path at the same place.
     """
 
     __slots__ = ()
