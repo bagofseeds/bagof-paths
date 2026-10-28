@@ -11,6 +11,7 @@ which also lets keyword arguments through.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 import inspect
 
@@ -29,8 +30,12 @@ async def run(
         raise RuntimeError(
             "AsyncPath needs a running asyncio event loop"
         ) from error
+    # Executor threads do not inherit the caller's context variables (the
+    # active local stage among them), so run the call in a copy of it, as
+    # `asyncio.to_thread` does.
+    context = contextvars.copy_context()
     result = await loop.run_in_executor(
-        None, functools.partial(func, *args, **kwargs)
+        None, functools.partial(context.run, func, *args, **kwargs)
     )
     if inspect.isawaitable(result):
         # The wrapped driver's method is itself a coroutine: we ran it in a

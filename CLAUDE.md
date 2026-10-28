@@ -59,6 +59,8 @@ src/bagof/paths/
   _async_path.py # AsyncPath + AsyncFile: the async surface over the bridge
   _async_fsspec.py # AsyncFSPath: a native async path over an fsspec
                  #   AsyncFileSystem (the async cloud driver)
+  _local_copy.py # local_copy() / local_stage(): scoped local copies of
+                 #   remote paths for libraries that open by name
   _bridge.py     # run a blocking callable in the default thread pool
   _staged.py     # Stage/AsyncStage: staged writes, commit/discard, and the
                  #   atomic file objects behind atomic=
@@ -71,6 +73,7 @@ tests/
   test_url_query.py           # what part of a URL is not the path
   test_is_local.py            # is_local() agrees with __fspath__
   test_staged.py              # staged() writes and atomic= writers
+  test_local_copy.py          # local_copy() / local_stage() lifetimes
   test_parity.py              # sync/async surfaces stay in lockstep
   test_docstrings.py          # every pycon block in a docstring or page
   test_licensing.py
@@ -124,6 +127,15 @@ name would collide.
   staged data and raises `CommitError`. `atomic=` on the writers is built on
   it. `AsyncPath.staged` is a plain method returning an `AsyncStage` (marked
   `_awaitable` for the parity tests): no I/O until it is entered or awaited.
+- **Local copies (`_local_copy.py`).** `local_copy()` (one mixin on `Path`
+  and `AsyncPath`) downloads a remote file/tree under its exact name into a
+  stage: the explicit `stage=`, else the active `local_stage()` (a
+  `ContextVar`, so per thread and task -- the bridge runs worker calls in a
+  copy of the caller's context so the stage reaches them), else a private
+  one. A stage lays copies out as `<scheme>/<bucket>/<key>` and ref-counts
+  them: each goes with its last holder; the stage removes leftovers on close.
+  A copy taken by hand is never removed by GC (a library may still read it);
+  only `cleanup()` or its stage closing removes it.
 - **`_drivers.py` absorbs the operations backends genuinely disagree on** —
   `rmdir` recursion, native `copy`/`move`, `walk` — behind adapters selected
   by driver type. A `GenericAdapter` duck-types any driver; named subclasses

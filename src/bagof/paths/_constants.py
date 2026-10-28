@@ -32,10 +32,12 @@ ADAPTER_MEMBERS = frozenset(
 )
 
 # Members computed by the wrapper itself, delegated to no driver: matching (see
-# _match.py), without_query and is_local.
-COMPUTED_MEMBERS = frozenset(
-    {"match", "full_match", "without_query", "is_local"}
-)
+# _match.py), without_query, is_local, and the local copies (_local_copy.py;
+# local_copy is on Path/AsyncPath only, so supports() checks the wrapper).
+COMPUTED_MEMBERS = frozenset({
+    "match", "full_match", "without_query", "is_local",
+    "local_copy", "local_stage",
+})
 
 # Members the I/O front-ends (Path, AsyncPath) build on top of the others,
 # whatever the driver: staged writes. A PurePath has none of them.

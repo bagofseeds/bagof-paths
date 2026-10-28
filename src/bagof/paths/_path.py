@@ -9,11 +9,12 @@ import typing_extensions as tx
 from . import _drivers, _staged
 from . import _engine as engine
 from ._base import BaseWrapper
+from ._local_copy import LocalCopyMixin
 from ._purepath import PurePathMixin
 from ._spec import BY_NAME
 
 
-class Path(PurePathMixin, BaseWrapper):
+class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
     """A path that works like [pathlib.Path][], local or in the cloud.
 
     Make one from a path string, a URL, or any path object:
