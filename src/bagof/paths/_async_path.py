@@ -30,6 +30,7 @@ from ._base import BaseWrapper
 from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
 from ._detect import is_async_driver as _is_async_driver
 from ._errors import UnsupportedPathOperation
+from ._local_copy import LocalCopyMixin
 from ._path import Path
 from ._protocols import merged_storage_options
 from ._purepath import PurePathMixin
@@ -194,7 +195,7 @@ def _maybe_async_driver(
     return fsspec_driver.AsyncFSPath.from_url(url, scheme, options)
 
 
-class AsyncPath(PurePathMixin, BaseWrapper):
+class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
     """The `await` version of [`Path`][bagof.paths.Path]: the same
     methods, as coroutines.
 

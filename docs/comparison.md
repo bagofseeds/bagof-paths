@@ -95,6 +95,10 @@ there, on `path.wrapped`.
 
 * **Local or not, in one call.** `is_local()` says whether a path is a file
   on this machine, the one `os.fspath` accepts, without touching storage.
+* **Local copies for libraries that open by name.** `local_copy()` downloads a
+  remote file or directory under its exact name and removes it when the block
+  ends. In one `local_stage()`, copies keep their places relative to each
+  other, so a file finds its companion files.
 * **One error for every library.** When an operation is not possible, you get
   the same `UnsupportedPathOperation`. It names the operation and the library.
 * **Safe defaults.** Where two libraries disagree in a way that could lose

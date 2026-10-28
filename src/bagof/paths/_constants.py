@@ -32,10 +32,12 @@ ADAPTER_MEMBERS = frozenset(
 )
 
 # Members computed by the wrapper itself, delegated to no driver: matching (see
-# _match.py), without_query and is_local.
-COMPUTED_MEMBERS = frozenset(
-    {"match", "full_match", "without_query", "is_local"}
-)
+# _match.py), without_query, is_local, and the local copies (_local_copy.py;
+# local_copy is on Path/AsyncPath only, so supports() checks the wrapper).
+COMPUTED_MEMBERS = frozenset({
+    "match", "full_match", "without_query", "is_local",
+    "local_copy", "local_stage",
+})
 
 # Driver-specific accessor properties on the base wrapper: present only when
 # the wrapped driver exposes the attribute (see BaseWrapper). Listed here so

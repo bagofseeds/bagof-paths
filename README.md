@@ -76,6 +76,28 @@ True
 True
 ```
 
+To hand a remote file to such a library, take a local copy. It keeps the
+file's exact name, and it is removed when the block ends; a local path is used
+as it is.
+
+```python
+with Path("s3://bucket/slides/case1.svs").local_copy() as local:
+    slide = openslide.OpenSlide(local)
+```
+
+Some formats come with companion files the library opens by itself (an
+Analyze `.hdr` and its `.img`, a MIRAX slide and its tile directory). Take
+their copies in one `local_stage()`, held at the same time, and they sit side
+by side as they do in the store:
+
+```python
+with Path.local_stage():
+    with hdr.local_copy() as h, img.local_copy() as i:
+        image = nibabel.load(h)
+```
+
+Changes to a copy are not written back.
+
 ## Credentials
 
 Pass connection details with `storage_options`. They go straight to the

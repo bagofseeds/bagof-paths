@@ -462,6 +462,41 @@ registry.
   without fsspec's `_get_kwargs_from_urls`, so `AsyncPath("s3://...?versionId=v")`
   read the *latest* version where `Path` read `v`; it now merges those options
   under the caller's, as UPath does.
+- **Local copies for by-name libraries [settled, owner] (#20).** OpenSlide,
+  h5py, nibabel memory maps and netCDF open a file by name only; refusing
+  `__fspath__` on a remote path (above) sends them here instead. Measured
+  prior art: fsspec's `open_local()` needs a caching chain
+  (`simplecache::...`), refuses a plain `memory://` URL, gives the copy a
+  *hashed name with no extension* (useless to a library that picks its format
+  from the extension), never cleans up, and a glob (`simplecache::.../slide*`)
+  fetched a MIRAX `.mrxs` but missed its tile directory. cloudpathlib's
+  `.fspath` keeps the name, but its cache lifetime is a global client
+  setting, not a scope.
+
+  `local_copy()` downloads a remote file or tree under its exact name; a local
+  path is used as it is. With `with`, the copy goes when *its own* block ends.
+  Taken by hand it stays until its `cleanup()` (or its stage closes) and is
+  **never** removed by garbage collection: a caller may hand the name to a
+  library and drop the handle while the file is still in use, so a GC
+  finalizer would be a use-after-free. Companion files (`.hdr`/`.img`,
+  `.mhd`/`.raw`, `.mrxs` + its directory) are not fetched on demand -- no
+  wrapper can intercept a library's own opens -- so the caller fetches them
+  into one `local_stage()` and holds them at the same time. A stage lays its
+  copies out as `<scheme>/<bucket-or-host>/<key>`, so copies from one store
+  keep their relative positions whatever the order they are fetched in, and
+  ref-counts them: a path held twice is downloaded once and removed with its
+  last holder; the stage removes leftovers when it closes. Explicit
+  (`local_copy(stage=...)`) and implicit (the innermost active stage) both
+  work. The active stage is a `ContextVar`, so each thread and asyncio task
+  sees its own; executor threads do not inherit context variables, so the
+  async bridge now runs every worker call in `contextvars.copy_context()`
+  (as `asyncio.to_thread` does), or an `AsyncPath.local_copy()` over a
+  synchronous driver would miss the stage. Two versions of one key
+  (`x?versionId=1`, `x?versionId=2`) would share a slot, so the second is
+  refused in that stage. Downloads are our own, not cloudpathlib's cache, so
+  lifetimes are the same on every driver; a download lands under a hidden
+  `.partial-` name first, so a failed one never leaves a half file a later
+  fetch would reuse.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/

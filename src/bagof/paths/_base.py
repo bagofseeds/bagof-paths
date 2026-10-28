@@ -192,7 +192,9 @@ class BaseWrapper:
         if name in ADAPTER_MEMBERS:
             return self._supports_adapter_member(name)
         if name in COMPUTED_MEMBERS:
-            return True
+            # Computed here, so available wherever the wrapper defines it
+            # (local_copy is on Path/AsyncPath, not PurePath).
+            return hasattr(self, name)
         if name in ACCESSOR_MEMBERS:
             # Check the driver *class*, not the instance: these accessors are
             # properties, and some (universal-pathlib's `fs`/`info`) build the
@@ -371,6 +373,36 @@ class BaseWrapper:
         """The concatenation of drive and root."""
         value = getattr(self._wrapped, "anchor", None)
         return value if isinstance(value, str) else self.drive + self.root
+
+    @classmethod
+    def local_stage(cls) -> tx.Any:
+        """A local directory shared by the local copies made inside it.
+
+        While the stage is active, every `local_copy()` in the same thread
+        or task goes into it, laid out as in its store, so copies taken at
+        the same time keep their relative positions; it is removed, with
+        anything left in it, when the block ends. A local path is never
+        copied:
+
+        ```pycon
+        >>> with Path.local_stage():
+        ...     with Path("/data/scan.nii").local_copy() as local:
+        ...         print(local)
+        /data/scan.nii
+        ```
+
+        ```python
+        with Path.local_stage():
+            with hdr.local_copy() as h, img.local_copy() as i:   # one store
+                image = nibabel.load(h)       # finds the .img beside it
+        ```
+
+        A stage can also be passed as `local_copy(stage=...)` and removed
+        with its `cleanup()`. Use `async with` with an `AsyncPath`.
+        """
+        from ._local_copy import LocalStage
+
+        return LocalStage()
 
     def is_local(self) -> bool:
         """Whether the path names a file on the local file system.
