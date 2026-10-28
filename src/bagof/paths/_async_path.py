@@ -269,7 +269,7 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """
         wrapped = self._wrapped
         if _is_async_driver(wrapped):
-            if self.protocol in LOCAL_PROTOCOLS:
+            if self.is_local():
                 return self._sync_type(LocalPath(os.fspath(wrapped)))
             raise UnsupportedPathOperation(
                 "this operation",

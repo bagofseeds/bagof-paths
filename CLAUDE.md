@@ -114,10 +114,13 @@ name would collide.
   differing only after a `?` are never merged. Local paths keep `?`/`#`;
   `file:` URIs follow Python 3.14's `from_uri` on every version
   (`_local_from_file_uri`), never the running pathlib.
-- **`is_local()` and `__fspath__` share one test** (`BaseWrapper.is_local`,
-  the protocol is in `LOCAL_PROTOCOLS`), so a path is local exactly when
-  `os.fspath` gives its file name. It is lexical and synchronous on every
-  front-end; the local set is fixed, not a protocol trait.
+- **`is_local()` and `__fspath__` share one test** (`BaseWrapper.is_local`:
+  `_store()` is `""`, i.e. the protocol is in `LOCAL_PROTOCOLS` and the path
+  is not an fsspec chain), so a path is local exactly when `os.fspath` gives
+  its file name. It is lexical and synchronous on every front-end; the local
+  set is fixed, not a protocol trait. Code that branches on "local" calls
+  `is_local()`, never `protocol in LOCAL_PROTOCOLS`: a backendless chain's
+  protocol is `""` (issue #49).
 - **Staged writes (`_staged.py`, design §5).** `staged()` yields a path in a
   hidden staging directory beside the target (local temp dir for a remote
   target), named exactly like the target; commit moves whatever was created
@@ -143,9 +146,10 @@ name would collide.
   defused here** (UPath's bare `rmdir()` recurses, so the wrapper always
   passes `recursive=False`).
 - **`_base.py` builds and identifies the wrapper.** Identity is
-  driver-independent: `__eq__`/`__hash__` on a canonical `(protocol, path)`
-  key, scheme aliases folded, family-scoped (a sync path never equals an async
-  one). Derivation flows through one hook, `with_wrapped`, so a subclass's
+  driver-independent: `__eq__`/`__hash__` on a canonical `(store, path)`
+  key (`_store()`: the scheme with aliases folded, or every link of an fsspec
+  chain), and front-end-independent (a `Path`, a `PurePath` and an
+  `AsyncPath` at one location are equal). Derivation flows through one hook, `with_wrapped`, so a subclass's
   state rides onto every derived path.
 - **`AsyncPath` handles two kinds of driver.** A *synchronous* driver is run
   on a sync view of the same driver in a worker thread (`_bridge.run` =

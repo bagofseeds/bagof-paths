@@ -52,6 +52,73 @@ def test_fsspec_chain_is_not_local() -> None:
     assert p.is_local() is False
 
 
+# A chain names remote storage through its links, so it is never local --
+# whichever front-end reads it and whether or not a backend is installed
+# (issue #49). Even a chain ending in file:// is not: os.fspath would hand a
+# library the file behind the cache, not what the chain reads.
+CHAINS = [
+    "simplecache::s3://bucket/x.nii",
+    "filecache::gs://bucket/x.nii",
+    "simplecache::blockcache::s3://bucket/x.nii",
+    "simplecache::file:///tmp/x.nii",
+]
+
+
+def _no_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    import bagof.paths._select as sel
+
+    monkeypatch.setattr(sel, "_upath_class", lambda: None)
+    monkeypatch.setattr(sel, "_cloudpathlib_impl", lambda scheme: None)
+
+
+@pytest.mark.parametrize("backend", [True, False])
+@pytest.mark.parametrize("cls", FRONTS)
+@pytest.mark.parametrize("url", CHAINS)
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_fsspec_chain_is_never_local(
+    monkeypatch: pytest.MonkeyPatch, url: str, cls: type, backend: bool
+) -> None:
+    if backend:
+        pytest.importorskip("upath")
+    else:
+        _no_backend(monkeypatch)
+    p = cls(url)
+    assert p.is_local() is False
+    with pytest.raises(NoLocalPathError):
+        os.fspath(p)
+    # A path derived from it is not local either.
+    assert p.parent.is_local() is False
+
+
+@pytest.mark.parametrize("url", CHAINS)
+def test_fsspec_chain_never_equals_a_local_path(url: str) -> None:
+    p = PurePath(url)
+    key = url.split("://", 1)[1]
+    assert p != PurePath(key)
+    assert p != pathlib.PurePath(key)
+    assert p != PurePath("/" + key)
+
+
+def test_fsspec_chains_compare_link_by_link() -> None:
+    a = PurePath("simplecache::s3://bucket/x.nii")
+    assert a == PurePath("simplecache::s3a://bucket/x.nii")  # an alias
+    assert hash(a) == hash(PurePath("simplecache::s3a://bucket/x.nii"))
+    assert a != PurePath("simplecache::gs://bucket/x.nii")
+    assert a != PurePath("filecache::s3://bucket/x.nii")
+    assert a != PurePath("s3://bucket/x.nii")
+
+
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_fsspec_chain_identity_does_not_depend_on_the_driver() -> None:
+    pytest.importorskip("upath")
+    url = "simplecache::s3://bucket/x.nii"
+    assert Path(url) == PurePath(url)
+    assert hash(Path(url)) == hash(PurePath(url))
+    # universal-pathlib reports only the outer link as the protocol; the
+    # store still reads every link.
+    assert Path(url) != Path("simplecache::gs://bucket/x.nii")
+
+
 def test_wrapped_upath_file_path_is_local(tmp_path: pathlib.Path) -> None:
     upath = pytest.importorskip("upath")
     driver = upath.UPath((tmp_path / "x").as_uri())
@@ -142,3 +209,15 @@ def test_no_local_path_error_is_public() -> None:
 
     assert "NoLocalPathError" in bagof.paths.__all__
     assert bagof.paths.NoLocalPathError is NoLocalPathError
+
+
+def test_chain_links() -> None:
+    from bagof.paths._protocols import chain_links
+
+    assert chain_links("simplecache::s3://b/k") == ("simplecache", "s3")
+    assert chain_links("SimpleCache::S3://b/k") == ("simplecache", "s3")
+    assert chain_links("a::b::s3://b/k::x") == ("a", "b", "s3")
+    # Not chains: a plain URL, a local name, a link that is no scheme.
+    assert chain_links("s3://b/k::x") == ()
+    assert chain_links("/tmp/a::b") == ()
+    assert chain_links("my file::s3://b/k") == ()
