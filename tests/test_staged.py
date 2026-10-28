@@ -1165,3 +1165,18 @@ def test_a_staging_directory_that_cannot_be_made_names_the_target(
         with pytest.raises(PermissionError) as info:
             make()
         assert info.value.filename == str(target)
+
+
+def test_a_remote_staging_directory_error_keeps_its_own_name(
+    memory: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A remote target is staged in the system temp directory, which is not
+    # beside the target: that error is about the temp directory, so it
+    # keeps the name it has.
+    def refuse(prefix: str, dir: tx.Any) -> str:
+        raise PermissionError(errno.EACCES, "Permission denied", "/tmp/x")
+
+    monkeypatch.setattr(staged_module.tempfile, "mkdtemp", refuse)
+    with pytest.raises(PermissionError) as info:
+        Path("memory://bucket/x.txt").staged()
+    assert info.value.filename == "/tmp/x"
