@@ -228,7 +228,11 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- staged writes -----------------------------------------------------
     def staged(
-        self, *, copy: bool = False, replace_type: bool = True
+        self,
+        *,
+        copy: bool = False,
+        replace_type: bool = True,
+        keep_on_failure: bool = False,
     ) -> _staged.Stage:
         """A staging area for a new version of this path.
 
@@ -285,23 +289,17 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
           all-or-nothing but not atomic: the old version is moved aside and
           the new one moved in, so it is briefly missing. On a remote path it
           is uploaded file by file, and readers can see a mixture meanwhile.
+        - An error inside the `with` block leaves this path as it was and
+          removes the staged data.
         - If committing fails, this path is left as it was (or restored), the
-          staged data is kept, and [`CommitError`][bagof.paths.CommitError]
-          says where. To drop it instead, keep the stage and discard it:
-
-          ```python
-          stage = target.staged()
-          try:
-              with stage as tmp:
-                  build(tmp)
-          except CommitError:
-              stage.discard()
-              raise
-          ```
-
-          The `atomic=True` writers always drop it, and raise the error
-          itself: their caller still holds the data. They also refuse a
-          directory at this path, as the plain writers do.
+          staged data is removed, and
+          [`CommitError`][bagof.paths.CommitError] is raised. With
+          `keep_on_failure=True` the data is kept instead, for work that is
+          costly to redo: the error says where, and the returned
+          [`Stage`][bagof.paths.Stage] can `commit()` again or `discard()`.
+          The `atomic=True` writers raise the original error rather than
+          `CommitError`, as the plain writers would, and refuse a directory
+          at this path, as the plain writers do.
 
         An error raised while your code writes at the staged path names the
         staged path, since that is the path it wrote. The `atomic=True`
@@ -316,7 +314,10 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         permissions are kept. On Windows, the replacement fails while
         another process has the file open.
         """
-        return _staged.Stage(self, copy=copy, replace_type=replace_type)
+        return _staged.Stage(
+            self, copy=copy, replace_type=replace_type,
+            keep_on_failure=keep_on_failure,
+        )
 
     # -- directory iteration -----------------------------------------------
     def iterdir(self) -> tx.Iterator[tx.Self]:

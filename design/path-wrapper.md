@@ -565,13 +565,16 @@ registry.
   `fs.put_file`, cloudpathlib's `upload_from`; s3fs/gcsfs/adlfs create the
   object only when the upload completes), a directory file by file, then
   stale objects are deleted (per-file atomic only). A failed commit leaves
-  the target as it was (or restored) and keeps the staged data, past garbage
-  collection, in `CommitError(OSError)`; a dropped stage is cleaned by a
-  finalizer. `copy=True` starts the staged entry as a copy (a download, for
-  a remote target) for read-modify-write jobs. `replace_type=False` refuses
-  a change between file and directory (`CommitError` with `EISDIR` or
-  `ENOTDIR`); the check sits in the commit, just before the old entry is
-  touched, since a directory can appear after any earlier check.
+  the target as it was (or restored), removes the staged data and raises
+  `CommitError(OSError)`; with `keep_on_failure=True` it keeps the data,
+  past garbage collection, for another `commit()` (#46: cleaning up after
+  ourselves is the default, keeping costly work is the opt-in). A dropped
+  stage is cleaned by a finalizer. `copy=True` starts the staged entry as a
+  copy (a download, for a remote target) for read-modify-write jobs.
+  `replace_type=False` refuses a change between file and directory
+  (`CommitError` with `EISDIR` or `ENOTDIR`); the check sits in the commit,
+  just before the old entry is touched, since a directory can appear after
+  any earlier check.
 
   `atomic=` on `write_bytes`, `write_text` and `open` is built on it (`open`
   needs a writing mode; `a`/`r+` start from a copy), and is **the plain
@@ -580,16 +583,15 @@ registry.
   (`IsADirectoryError`, before staging and again at commit), never
   replacing it (#45). A failure, a failed commit included, removes the
   staging directory and raises the error itself, not `CommitError` (#46):
-  the caller still holds its data and has no stage to commit again. An
-  `OSError` that names an entry of the staging directory is re-raised
-  naming the target (#47): the caller never saw that directory, and it is
-  gone when the error is read. `staged()` keeps its defaults: a change of
-  type is a new version; the data is kept, since its caller may have built
-  something costly (a caller that wants it dropped keeps the `Stage` and
-  `discard()`s it on `CommitError`); and an error raised while the caller
-  writes at the staged path names that path, which is the one it wrote.
-  Making the staging directory is the exception: the caller has not seen
-  it yet, so a failure there names the target on every stage.
+  the caller still holds its data and has no stage to commit again, so it
+  never keeps it. An `OSError` that names an entry of the staging directory
+  is re-raised naming the target (#47): the caller never saw that
+  directory, and it is gone when the error is read. `staged()` keeps a
+  change of type as a new version unless `replace_type=False`, and an error
+  raised while its caller writes at the staged path names that path, which
+  is the one it wrote. Making the staging directory is the exception: the
+  caller has not seen it yet, so a failure there names the target on every
+  stage.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has

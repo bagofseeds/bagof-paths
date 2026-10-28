@@ -123,12 +123,14 @@ name would collide.
   target), named exactly like the target; commit moves whatever was created
   there (file: one `os.replace`; directory or type change: move aside, move
   in, move back on failure; remote: upload, never a streamed write, since
-  fsspec commits on close even after an error). A failed commit keeps the
-  staged data and raises `CommitError`. `atomic=` on the writers is built on
-  it (`AtomicStage`/`AsyncAtomicStage`) and must act as the plain write
-  wherever the stage would show: it refuses a directory (#45), a failure
-  leaves nothing behind and raises the error itself (#46), and the error
-  names the target, not the staging directory (#47). `AsyncPath.staged` is a plain method returning an `AsyncStage` (marked
+  fsspec commits on close even after an error). A failed commit removes the
+  staged data and raises `CommitError` (`keep_on_failure=True` keeps it for
+  another commit). `atomic=` on the writers is built on it
+  (`AtomicStage`/`AsyncAtomicStage`, `atomic()`/`aatomic()`) and must act as
+  the plain write wherever the stage would show: it refuses a directory
+  (#45), a failure leaves nothing behind and raises the error itself (#46),
+  and the error names the target, not the staging directory (#47).
+  `AsyncPath.staged` is a plain method returning an `AsyncStage` (marked
   `_awaitable` for the parity tests): no I/O until it is entered or awaited.
 - **Local copies (`_local_copy.py`).** `local_copy()` (one mixin on `Path`
   and `AsyncPath`) downloads a remote file/tree under its exact name into a
