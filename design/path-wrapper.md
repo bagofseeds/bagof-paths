@@ -294,6 +294,7 @@ names the accessor `blob` instead of `key`):
 | bucket-relative | — | — (compute `path` minus `drive`) | `.key` (s3) / `.blob` (gs) | see below |
 | `glob` | `recurse_symlinks` 3.13+ | default `False` | default `True` (moot: no cloud symlinks) | pathlib defaults |
 | `touch` | `(mode, exist_ok)` | `(mode, exist_ok)` | `(exist_ok, mode)` — **order differs** | forward by keyword only |
+| `exists`/`is_*` on an error | < 3.14: raise any `OSError` but "not found" (`ENAMETOOLONG`, `EACCES` on a parent); 3.14: `os.path.exists`/`isfile`/`isdir`, the rest catch `(OSError, ValueError)` — always `False` | the backend's own | the backend's own | local path: 3.14 on every version, `False`; `stat()` still raises. Remote: the driver's own (issue #24) |
 
 **Mechanism [settled: one generic adapter, named adapters override only
 divergences].** The adapter layer is an inheritance tree rooted in a single

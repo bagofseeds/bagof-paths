@@ -96,6 +96,34 @@ def invoke(
     kwargs: tx.Optional[tx.Mapping[str, tx.Any]] = None,
 ) -> tx.Any:
     """Resolve a delegated *method* member."""
+    try:
+        return _invoke(wrapper, member, args, kwargs)
+    except (OSError, ValueError):
+        if not quiet_check(wrapper, member):
+            raise
+        return False
+
+
+def quiet_check(wrapper: BaseWrapper, member: Member) -> bool:
+    """Whether an error from this member reads as False rather than raises.
+
+    Python 3.14 made pathlib's status checks (`exists`, `is_file`, the
+    other `is_*`) return False on any `OSError` or `ValueError`: a name
+    too long, a parent that cannot be searched, an embedded NUL. Earlier
+    versions raise for all but "not found". A local path follows 3.14 on
+    every version, so a check answers the same everywhere; `stat()` still
+    raises, for a caller that must see the error. On 3.14 this changes
+    nothing. A remote driver's checks are its own and are left alone.
+    """
+    return member.check and wrapper.is_local()
+
+
+def _invoke(
+    wrapper: BaseWrapper,
+    member: Member,
+    args: tx.Tuple[tx.Any, ...],
+    kwargs: tx.Optional[tx.Mapping[str, tx.Any]],
+) -> tx.Any:
     kwargs = _drop_defaults(kwargs or {}, member.normalize)
     args = coerce_args(member, args)
     method = getattr(wrapper._wrapped, member.name, None)

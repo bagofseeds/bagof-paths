@@ -307,9 +307,14 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
                 member = BY_NAME[name]
                 call_kwargs = engine._drop_defaults(kwargs, member.normalize)
                 call_args = engine.coerce_args(member, args)
-                result = method(*call_args, **call_kwargs)
-                if inspect.isawaitable(result):
-                    result = await result
+                try:
+                    result = method(*call_args, **call_kwargs)
+                    if inspect.isawaitable(result):
+                        result = await result
+                except (OSError, ValueError):
+                    if not engine.quiet_check(self, member):
+                        raise
+                    return False
                 return engine._finish(self, result, member.result)
         # Sync driver, or a native driver that lacks this member.
         result = await bridge.run(getattr(self._sync(), name), *args, **kwargs)
@@ -348,19 +353,39 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- status queries ----------------------------------------------------
     async def exists(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path exists."""
+        """Whether the path exists.
+
+        On a local path this follows Python 3.14 on every version: an
+        error returns False rather than raising. A name too long for the
+        file system is not there, and neither is one whose parent you may
+        not search. To see the error, call `stat()`, which still raises.
+        The other status checks (`is_file`, `is_dir`, `is_symlink`, ...)
+        do the same.
+
+        ```pycon
+        >>> import asyncio
+        >>> asyncio.run(AsyncPath("a" * 300).exists())
+        False
+        ```
+        """
         return await self._call(
             "exists", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def is_file(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path is a regular file."""
+        """Whether the path is a regular file.
+
+        Like `exists`, it returns False on an error on a local path.
+        """
         return await self._call(
             "is_file", (), {"follow_symlinks": follow_symlinks}
         )
 
     async def is_dir(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path is a directory."""
+        """Whether the path is a directory.
+
+        Like `exists`, it returns False on an error on a local path.
+        """
         return await self._call(
             "is_dir", (), {"follow_symlinks": follow_symlinks}
         )
