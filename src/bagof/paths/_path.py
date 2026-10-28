@@ -6,7 +6,7 @@ import os
 
 import typing_extensions as tx
 
-from . import _drivers
+from . import _drivers, _staged
 from . import _engine as engine
 from ._base import BaseWrapper
 from ._local_copy import LocalCopyMixin
@@ -111,8 +111,32 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         encoding: tx.Optional[str] = None,
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
+        *,
+        atomic: bool = False,
     ) -> tx.IO[tx.Any]:
-        """Open the path and return a file object, like `open`."""
+        """Open the path and return a file object, like `open`.
+
+        With `atomic=True` (a writing mode only) the file is written in a
+        staging area and moved onto the path when it is closed, so readers
+        see the old content or the new, never a half-written file; leaving
+        a `with` block with an error discards it. An appending or `r+`
+        mode starts from a copy of the current content. See
+        [`staged`][bagof.paths.Path.staged].
+        """
+        if atomic:
+            copy = _staged.check_atomic_mode(mode)
+            if "x" in mode and self.exists():
+                raise _staged.exists_error(self)
+            stage = self.staged(copy=copy)
+            try:
+                handle = stage.path.open(
+                    mode, buffering=buffering, encoding=encoding,
+                    errors=errors, newline=newline,
+                )
+            except BaseException:
+                stage.discard()
+                raise
+            return _staged.AtomicFile(handle, stage)
         return engine.invoke(
             self, BY_NAME["open"], (mode,),
             {
@@ -139,8 +163,16 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
             {"encoding": encoding, "errors": errors, "newline": newline},
         )
 
-    def write_bytes(self, data: tx.Any) -> int:
-        """Write `data` to the file as bytes, replacing any content."""
+    def write_bytes(self, data: tx.Any, *, atomic: bool = False) -> int:
+        """Write `data` to the file as bytes, replacing any content.
+
+        With `atomic=True` the new content is written beside the file and
+        moved over it in one step, so readers never see a partial file
+        (see [`staged`][bagof.paths.Path.staged]).
+        """
+        if atomic:
+            with self.staged() as staged:
+                return staged.write_bytes(data)
         return engine.invoke(self, BY_NAME["write_bytes"], (data,))
 
     def write_text(
@@ -149,12 +181,88 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         encoding: tx.Optional[str] = None,
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
+        *,
+        atomic: bool = False,
     ) -> int:
-        """Write `data` to the file as text, replacing any content."""
+        """Write `data` to the file as text, replacing any content.
+
+        `atomic=True` works as in
+        [`write_bytes`][bagof.paths.Path.write_bytes].
+        """
+        if atomic:
+            with self.staged() as staged:
+                return staged.write_text(
+                    data, encoding=encoding, errors=errors, newline=newline
+                )
         return engine.invoke(
             self, BY_NAME["write_text"], (data,),
             {"encoding": encoding, "errors": errors, "newline": newline},
         )
+
+    # -- staged writes -----------------------------------------------------
+    def staged(self, *, copy: bool = False) -> _staged.Stage:
+        """A staging area for a new version of this path.
+
+        Create a file or a directory at the staged path; on leaving the
+        `with` block it replaces this path. An error inside the block
+        leaves this path as it was, and staging nothing changes nothing.
+
+        ```pycon
+        >>> import tempfile
+        >>> from bagof.paths import Path
+        >>> target = Path(tempfile.mkdtemp()) / "scan.txt"
+        >>> with target.staged() as tmp:
+        ...     tmp.name == target.name
+        ...     _ = tmp.write_text("new")
+        ...     target.exists()
+        True
+        False
+        >>> target.read_text()
+        'new'
+        ```
+
+        The staged path has the same name as this one, so a library that
+        saves by file name (and reads the extension) works on it. It does
+        not exist until your code creates it, as a file or a directory:
+
+        ```python
+        with Path("out/scan.nii.gz").staged() as tmp:
+            nibabel.save(image, tmp)
+
+        with Path("s3://bucket/store.zarr").staged() as tmp:
+            zarr.save(tmp, data)       # a local directory, uploaded on exit
+        ```
+
+        `copy=True` starts the staged version as a copy of this path (a
+        file, or a whole directory), for jobs that update it in place: zarr
+        in `"r+"` mode, h5py in `"a"` mode, appending. On a remote path that
+        is a full download. If this path does not exist, nothing is copied.
+
+        Outside a `with` block, call `commit()` or `discard()` on the
+        returned [`Stage`][bagof.paths.Stage]; its `path` is the staged path.
+
+        What committing guarantees:
+
+        - **A file** replaces a local file in one atomic step on POSIX
+          (readers that have the old file open, even memory-mapped, keep
+          reading it), and a remote object in one upload.
+        - **A directory**, or a change between file and directory, is
+          all-or-nothing but not atomic: the old version is moved aside and
+          the new one moved in, so it is briefly missing. On a remote path it
+          is uploaded file by file, and readers can see a mixture meanwhile.
+        - If committing fails, this path is left as it was (or restored), the
+          staged data is kept, and [`CommitError`][bagof.paths.CommitError]
+          says where.
+
+        The staging area is a hidden directory beside this path (beside the
+        file a symbolic link names), so the move stays on one file system; a
+        remote path is staged in a local temporary directory. A crash can
+        leave the hidden directory behind. Replacing a file gives it a new
+        inode, so other hard links keep the old content; the old file's
+        permissions are kept. On Windows, the replacement fails while
+        another process has the file open.
+        """
+        return _staged.Stage(self, copy=copy)
 
     # -- directory iteration -----------------------------------------------
     def iterdir(self) -> tx.Iterator[tx.Self]:

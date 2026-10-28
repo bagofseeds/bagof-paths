@@ -39,6 +39,10 @@ COMPUTED_MEMBERS = frozenset({
     "local_copy", "local_stage",
 })
 
+# Members the I/O front-ends (Path, AsyncPath) build on top of the others,
+# whatever the driver: staged writes. A PurePath has none of them.
+STAGED_MEMBERS = frozenset({"staged"})
+
 # Driver-specific accessor properties on the base wrapper: present only when
 # the wrapped driver exposes the attribute (see BaseWrapper). Listed here so
 # supports()/capabilities() can answer for them without touching the property

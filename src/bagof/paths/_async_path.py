@@ -26,6 +26,7 @@ import typing_extensions as tx
 
 from . import _bridge as bridge
 from . import _engine as engine
+from . import _staged
 from ._base import BaseWrapper
 from ._constants import LOCAL_PROTOCOLS, SCHEME_RE
 from ._detect import is_async_driver as _is_async_driver
@@ -37,6 +38,16 @@ from ._purepath import PurePathMixin
 from ._spec import BY_NAME
 
 _WALK_DONE = object()
+
+
+def _awaitable(func: tx.Callable[..., tx.Any]) -> tx.Callable[..., tx.Any]:
+    """Mark a plain method whose result is awaited or used with `async with`.
+
+    Its call does no I/O; the work happens when the result is awaited or
+    entered. The sync/async parity tests count it as asynchronous.
+    """
+    func._returns_awaitable = True  # type: ignore[attr-defined]
+    return func
 
 
 def _accepts_kw(func: tx.Any, name: str) -> bool:
@@ -404,13 +415,31 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         encoding: tx.Optional[str] = None,
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
+        *,
+        atomic: bool = False,
     ) -> tx.Any:
         """Open the path and return an async file object.
 
         Use it with `async with` / `async for`. The handle's reads and
         writes are awaited directly on a native driver, or run in a worker
-        thread on a synchronous one.
+        thread on a synchronous one. `atomic=True` works as in
+        [`Path.open`][bagof.paths.Path.open]: closing commits, leaving an
+        `async with` block with an error discards.
         """
+        if atomic:
+            copy = _staged.check_atomic_mode(mode)
+            if "x" in mode and await self.exists():
+                raise _staged.exists_error(self)
+            stage = await self.staged(copy=copy)
+            try:
+                handle = await stage.path.open(
+                    mode, buffering=buffering, encoding=encoding,
+                    errors=errors, newline=newline,
+                )
+            except BaseException:
+                await stage.discard()
+                raise
+            return _staged.AsyncAtomicFile(handle, stage)
         kwargs = {
             "buffering": buffering, "encoding": encoding,
             "errors": errors, "newline": newline,
@@ -446,8 +475,15 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
             {"encoding": encoding, "errors": errors, "newline": newline},
         )
 
-    async def write_bytes(self, data: tx.Any) -> int:
-        """Write `data` to the file as bytes, replacing any content."""
+    async def write_bytes(self, data: tx.Any, *, atomic: bool = False) -> int:
+        """Write `data` to the file as bytes, replacing any content.
+
+        `atomic=True` works as in
+        [`Path.write_bytes`][bagof.paths.Path.write_bytes].
+        """
+        if atomic:
+            async with self.staged() as staged:
+                return await staged.write_bytes(data)
         return await self._call("write_bytes", (data,))
 
     async def write_text(
@@ -456,12 +492,41 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
         encoding: tx.Optional[str] = None,
         errors: tx.Optional[str] = None,
         newline: tx.Optional[str] = None,
+        *,
+        atomic: bool = False,
     ) -> int:
-        """Write `data` to the file as text, replacing any content."""
+        """Write `data` to the file as text, replacing any content.
+
+        `atomic=True` works as in
+        [`Path.write_bytes`][bagof.paths.Path.write_bytes].
+        """
+        if atomic:
+            async with self.staged() as staged:
+                return await staged.write_text(
+                    data, encoding=encoding, errors=errors, newline=newline
+                )
         return await self._call(
             "write_text", (data,),
             {"encoding": encoding, "errors": errors, "newline": newline},
         )
+
+    # -- staged writes -----------------------------------------------------
+    @_awaitable
+    def staged(self, *, copy: bool = False) -> _staged.AsyncStage:
+        """A staging area for a new version of this path.
+
+        The same as [`Path.staged`][bagof.paths.Path.staged], used with
+        `async with`; the staged path is an `AsyncPath`:
+
+        ```python
+        async with AsyncPath("out/scan.nii.gz").staged() as tmp:
+            await tmp.write_bytes(content)
+        ```
+
+        Outside an `async with` block, `await` it to make the staging
+        area, then `await` its `commit()` or `discard()`.
+        """
+        return _staged.AsyncStage(self, copy=copy)
 
     # -- directory iteration -----------------------------------------------
     async def iterdir(self) -> tx.AsyncIterator[tx.Self]:

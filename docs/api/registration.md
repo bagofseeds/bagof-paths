@@ -1,6 +1,6 @@
 # Registration and errors
 
-How to add support for a new URL scheme or a new path library, and the two
+How to add support for a new URL scheme or a new path library, and the
 errors these paths can raise.
 
 ## ::: bagof.paths.register_protocol
@@ -14,3 +14,5 @@ errors these paths can raise.
 ## ::: bagof.paths.NoDriverError
 
 ## ::: bagof.paths.UnsupportedPathOperation
+
+## ::: bagof.paths.CommitError

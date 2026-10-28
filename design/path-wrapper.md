@@ -462,6 +462,60 @@ registry.
   without fsspec's `_get_kwargs_from_urls`, so `AsyncPath("s3://...?versionId=v")`
   read the *latest* version where `Path` read `v`; it now merges those options
   under the caller's, as UPath does.
+- **Staged writes [settled, owner] (issue #19).** `path.staged()` yields a
+  path *inside a private staging directory*, named exactly like the target
+  and not yet created; whatever the caller creates there -- a file or a
+  directory -- is moved onto the target on commit. The name is the target's,
+  so a library that saves by name and reads the extension (nibabel) sees no
+  difference, and one that refuses an existing path (zarr) is happy too.
+  Measured before deciding (CPython 3.13, fsspec 2026.9.0, s3fs 2026.9.0,
+  cloudpathlib 0.26.0):
+
+  - `tempfile.mkstemp` creates `0600`; a naive "temp file + replace" turned a
+    `0644` target into `0600`. The staged entry is created by the caller with
+    the normal umask, and a replaced file gets the old one's mode.
+  - fsspec file objects commit on `close()` even when the `with` block raised
+    (`memory://` kept `b"half"`); cloudpathlib uploaded the partial content
+    too. A streamed remote write is never safe; committing uploads a finished
+    local file instead.
+  - fsspec transactions are not a foundation: they only hold back writes that
+    go through `fs.open` (s3fs's own `pipe_file`/`put_file`, used by zarr and
+    by uploads, ignore them); they live on the cached filesystem instance, so
+    another caller's write to the same store was swallowed into ours and would
+    have been discarded with it; and the local transaction writes in the
+    system temp directory and `shutil.move`s it, a copy across file systems.
+  - An in-place rewrite under an open memory map killed the reader with
+    SIGBUS; after `os.replace` the map kept reading the old content, and an
+    open reader kept the old bytes. Replacing is what keeps readers safe.
+
+  Commit: nothing staged leaves the target as it was (silently); a file over
+  a file is one `os.replace` after `fsync`, then the directory is fsynced
+  (atomic on POSIX); a directory or a change of type moves the old entry
+  aside *into* the staging directory (same file system) and the new one in,
+  moving the old one back if that fails (all-or-nothing, not atomic). The
+  staging directory is hidden beside the target, resolved through symbolic
+  links; a remote target is staged in a local temporary directory and
+  uploaded: a file with the driver's own upload (universal-pathlib's
+  `fs.put_file`, cloudpathlib's `upload_from`; s3fs/gcsfs/adlfs create the
+  object only when the upload completes), a directory file by file, then
+  stale objects are deleted (per-file atomic only). A failed commit leaves
+  the target as it was (or restored) and keeps the staged data, past garbage
+  collection, in `CommitError(OSError)`; a dropped stage is cleaned by a
+  finalizer. `copy=True` starts the staged entry as a copy (a download, for
+  a remote target) for read-modify-write jobs. `atomic=` on `write_bytes`,
+  `write_text` and `open` is built on it (`open` needs a writing mode;
+  `a`/`r+` start from a copy).
+
+  Not adopted: driver transactions (above); one transaction spanning several
+  unrelated files, which cannot be all-or-nothing once the first commit has
+  happened; a symlink-swap for atomic directory replacement, which turns the
+  target into a link. Prior art the shape follows: Hadoop/Spark output
+  committers (write under `_temporary/` beside the output, rename at commit;
+  the S3A *staging committer* stages on local disk and uploads at commit),
+  the staging area of the version-control tool (the name), Go's `renameio`
+  (temp file in the same directory, `CloseAtomicallyReplace`/`Cleanup`),
+  Rust's `tempfile::NamedTempFile::persist`, and fsspec's
+  `commit`/`discard` vocabulary.
 - **Local copies for by-name libraries [settled, owner] (#20).** OpenSlide,
   h5py, nibabel memory maps and netCDF open a file by name only; refusing
   `__fspath__` on a remote path (above) sends them here instead. Measured

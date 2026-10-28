@@ -19,6 +19,16 @@ def _own_io_functions(cls: type) -> set:
     }
 
 
+def _is_async(func: object) -> bool:
+    # A plain method that returns an awaitable / async context manager (and
+    # does no I/O itself) is marked as such, e.g. AsyncPath.staged.
+    return (
+        inspect.iscoroutinefunction(func)
+        or inspect.isasyncgenfunction(func)
+        or getattr(func, "_returns_awaitable", False)
+    )
+
+
 def _shape(func: object) -> list:
     return [
         (p.name, p.kind, p.default)
@@ -30,10 +40,7 @@ def test_async_mirrors_every_sync_io_member() -> None:
     for name in _own_io_functions(Path):
         member = getattr(AsyncPath, name, None)
         assert member is not None, f"AsyncPath is missing {name}"
-        is_async = inspect.iscoroutinefunction(
-            member
-        ) or inspect.isasyncgenfunction(member)
-        assert is_async, f"AsyncPath.{name} should be async"
+        assert _is_async(member), f"AsyncPath.{name} should be async"
 
 
 def test_async_has_no_stray_sync_members() -> None:
@@ -43,10 +50,7 @@ def test_async_has_no_stray_sync_members() -> None:
         for name, value in vars(AsyncPath).items()
         if not name.startswith("_")
         and callable(value)
-        and not (
-            inspect.iscoroutinefunction(value)
-            or inspect.isasyncgenfunction(value)
-        )
+        and not _is_async(value)
     }
     assert strays == set(), f"AsyncPath has non-async public methods: {strays}"
 

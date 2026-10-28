@@ -62,6 +62,8 @@ src/bagof/paths/
   _local_copy.py # local_copy() / local_stage(): scoped local copies of
                  #   remote paths for libraries that open by name
   _bridge.py     # run a blocking callable in the default thread pool
+  _staged.py     # Stage/AsyncStage: staged writes, commit/discard, and the
+                 #   atomic file objects behind atomic=
 tests/
   test_import.py, test_identity.py, test_derivation.py
   test_path_sync.py, test_path_io.py, test_fallbacks.py, test_match.py
@@ -70,6 +72,7 @@ tests/
   test_driver_selection.py    # URL construction + register_protocol
   test_url_query.py           # what part of a URL is not the path
   test_is_local.py            # is_local() agrees with __fspath__
+  test_staged.py              # staged() writes and atomic= writers
   test_local_copy.py          # local_copy() / local_stage() lifetimes
   test_parity.py              # sync/async surfaces stay in lockstep
   test_docstrings.py          # every pycon block in a docstring or page
@@ -115,6 +118,15 @@ name would collide.
   the protocol is in `LOCAL_PROTOCOLS`), so a path is local exactly when
   `os.fspath` gives its file name. It is lexical and synchronous on every
   front-end; the local set is fixed, not a protocol trait.
+- **Staged writes (`_staged.py`, design §5).** `staged()` yields a path in a
+  hidden staging directory beside the target (local temp dir for a remote
+  target), named exactly like the target; commit moves whatever was created
+  there (file: one `os.replace`; directory or type change: move aside, move
+  in, move back on failure; remote: upload, never a streamed write, since
+  fsspec commits on close even after an error). A failed commit keeps the
+  staged data and raises `CommitError`. `atomic=` on the writers is built on
+  it. `AsyncPath.staged` is a plain method returning an `AsyncStage` (marked
+  `_awaitable` for the parity tests): no I/O until it is entered or awaited.
 - **Local copies (`_local_copy.py`).** `local_copy()` (one mixin on `Path`
   and `AsyncPath`) downloads a remote file/tree under its exact name into a
   stage: the explicit `stage=`, else the active `local_stage()` (a
