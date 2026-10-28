@@ -344,3 +344,160 @@ def test_a_natively_async_driver_downloads_on_the_loop() -> None:
             assert not await local.exists()
 
     asyncio.run(go())
+
+
+# -- the less common paths ---------------------------------------------------
+class _StreamOnly:
+    """A remote driver offering nothing but `open("rb")` and `is_dir()`."""
+
+    def __init__(self, url: str, data: bytes) -> None:
+        self._url, self._data = url, data
+
+    def __str__(self) -> str:
+        return self._url
+
+    def __fspath__(self) -> str:  # pragma: no cover - never called
+        raise NotImplementedError("a remote path has no local path")
+
+    def is_dir(self) -> bool:
+        return False
+
+    def open(self, mode: str = "r", *args: object, **kwargs: object) -> object:
+        import io
+
+        assert mode == "rb"
+        return io.BytesIO(self._data)
+
+
+def _register_native_async() -> str:
+    """A natively-async in-memory scheme (no network, no credentials)."""
+    fsspec = pytest.importorskip("fsspec")
+    wrapper_mod = pytest.importorskip("fsspec.implementations.asyn_wrapper")
+
+    class _MemAsyncEdge(wrapper_mod.AsyncFileSystemWrapper):
+        protocol = "memasyncedge"
+        async_impl = True
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            for drop in ("asynchronous", "skip_instance_cache"):
+                kwargs.pop(drop, None)
+            super().__init__(MemoryFileSystem(), asynchronous=True)
+
+        @classmethod
+        def _strip_protocol(cls, path: str) -> str:
+            text = path.replace("memasyncedge://", "memory://")
+            return MemoryFileSystem._strip_protocol(text)
+
+    fsspec.register_implementation("memasyncedge", _MemAsyncEdge, clobber=True)
+    return "memasyncedge"
+
+
+def _stages_in_tmp() -> set:
+    import tempfile
+
+    return {
+        name for name in os.listdir(tempfile.gettempdir())
+        if name.startswith("bagof-stage-")
+    }
+
+
+def test_a_driver_with_only_open_is_streamed() -> None:
+    remote = Path(_StreamOnly("stream://host/d/scan.nii", b"streamed"))
+    with remote.local_copy() as local:
+        assert local.name == "scan.nii"
+        assert local.read_bytes() == b"streamed"
+    assert not local.exists()
+
+
+def test_a_cloudpathlib_path_uses_its_own_download() -> None:
+    local_mod = pytest.importorskip("cloudpathlib.local")
+    remote = local_mod.LocalS3Client().CloudPath("s3://b/d/scan.nii.gz")
+    remote.write_bytes(b"nii")
+    with Path(remote).local_copy() as local:
+        assert local.name == "scan.nii.gz"
+        assert local.read_bytes() == b"nii"
+    assert not local.exists()
+
+
+def test_a_path_that_names_nothing_is_refused() -> None:
+    with pytest.raises(ValueError, match="names no file or directory"):
+        Path("memory://").local_copy()
+
+
+def test_a_directory_holding_another_file_is_kept() -> None:
+    with Path.local_stage():
+        with Path(HDR).local_copy() as local:
+            stray = pathlib.Path(os.fspath(local)).parent / "stray.txt"
+            stray.write_text("not ours")
+        # The copy went, but its directory still holds a file it did not
+        # make, so the directory stays until the stage closes.
+        assert stray.exists()
+    assert not stray.exists()
+
+
+def test_a_failed_download_without_a_stage_leaves_no_stage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken(wrapper: object, local: str) -> None:
+        raise OSError("connection lost")
+
+    before = _stages_in_tmp()
+    monkeypatch.setattr(_local_copy, "_download_file", broken)
+    with pytest.raises(OSError, match="connection lost"):
+        Path(HDR).local_copy()
+    assert _stages_in_tmp() == before
+
+
+def test_a_failed_native_async_download_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheme = _register_native_async()
+
+    async def broken(wrapper: object, local: str) -> None:
+        raise OSError("connection lost")
+
+    monkeypatch.setattr(_local_copy, "_adownload_file", broken)
+
+    async def go() -> None:
+        before = _stages_in_tmp()
+        with pytest.raises(OSError, match="connection lost"):
+            async with AsyncPath(f"{scheme}://b/d/scan.hdr").local_copy():
+                pass  # pragma: no cover - never reached
+        assert _stages_in_tmp() == before
+        async with AsyncPath.local_stage() as stage:
+            with pytest.raises(OSError, match="connection lost"):
+                await AsyncPath(f"{scheme}://b/d/scan.hdr").local_copy()
+            assert list(pathlib.Path(os.fspath(stage.path)).rglob("*")) == []
+
+    asyncio.run(go())
+
+
+def test_an_async_handle_can_be_awaited_and_cleaned_up_twice(
+    tmp_path: pathlib.Path,
+) -> None:
+    async def go() -> None:
+        handle = AsyncPath(HDR).local_copy()
+        await handle.cleanup()  # never fetched: nothing to let go
+        handle = AsyncPath(HDR).local_copy()
+        assert await handle is await handle  # fetched once
+        local = handle.path
+        await handle.cleanup()
+        await handle.cleanup()
+        assert not await local.exists()
+        mine = AsyncPath(str(tmp_path))
+        same = await mine.local_copy()
+        assert same.path == mine
+        await same.cleanup()
+        assert tmp_path.exists()  # a local path is never removed
+
+    asyncio.run(go())
+
+
+def test_reprs_say_what_and_where() -> None:
+    with Path.local_stage() as stage:
+        assert "open" in repr(stage)
+        handle = Path(HDR).local_copy()
+        assert "scan.hdr" in repr(handle)
+        handle.cleanup()
+    assert "closed" in repr(stage)
+    assert "not fetched" in repr(AsyncPath(HDR).local_copy())
