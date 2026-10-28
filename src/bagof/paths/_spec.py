@@ -32,6 +32,9 @@ class Member(tx.NamedTuple):
     fallback: tx.Optional[str] = None
     # Primitives the fallback needs; if any is missing the member raises.
     needs: tx.Tuple[str, ...] = ()
+    # True: the positional arguments are paths, coerced as pathlib does
+    # (see _args.path_arg) before they reach the driver.
+    paths: bool = False
 
 
 # The pure-path surface: lexical members that every driver either implements
@@ -48,7 +51,7 @@ PURE_PATH_MEMBERS = (
     Member("parent", prop=True, result=PATH),
     Member("parents", prop=True, result=PATH_TUPLE),
     # methods
-    Member("joinpath", result=PATH),
+    Member("joinpath", result=PATH, paths=True),
     Member("with_name", result=PATH),
     # with_stem / is_relative_to were added to pathlib in 3.9; synthesize them
     # so the surface is uniform on the 3.8 floor.
@@ -60,19 +63,23 @@ PURE_PATH_MEMBERS = (
     Member("as_uri"),
     Member("is_absolute"),
     Member(
-        "is_relative_to", fallback="is_relative_to", needs=("relative_to",)
+        "is_relative_to", fallback="is_relative_to", needs=("relative_to",),
+        paths=True,
     ),
-    Member("relative_to", result=PATH, normalize=(("walk_up", False),)),
+    Member(
+        "relative_to", result=PATH, normalize=(("walk_up", False),),
+        paths=True,
+    ),
     # with_segments builds a sibling path from string parts; pathlib gained it
     # in 3.12, so synthesize it from the wrapped type on older interpreters.
     Member(
-        "with_segments", result=PATH, fallback="with_segments"
+        "with_segments", result=PATH, fallback="with_segments", paths=True
     ),
     # is_reserved is lexical (Windows device names). pathlib removed it in
     # 3.15, so synthesize it from ntpath.isreserved where the driver lacks it.
     Member("is_reserved", fallback="is_reserved"),
     # joinuri joins a URI onto the path (universal-pathlib); delegate-or-raise.
-    Member("joinuri", result=PATH),
+    Member("joinuri", result=PATH, paths=True),
     # match / full_match are not delegated: they are computed lexically on the
     # canonical path (see _match.py) so their semantics are identical across
     # drivers and Python versions.
@@ -90,7 +97,7 @@ IO_MEMBERS = (
     Member("is_symlink", IO),
     Member("stat", IO, normalize=(("follow_symlinks", True),)),
     Member("lstat", IO),
-    Member("samefile", IO),
+    Member("samefile", IO, paths=True),
     # the read/write primitive; buffering/encoding/errors/newline forwarded
     # only when set, so a driver whose open() takes just a mode still works.
     Member(
@@ -136,8 +143,8 @@ IO_MEMBERS = (
     Member("absolute", IO, result=PATH),
     Member("expanduser", IO, result=PATH),
     Member("readlink", IO, result=PATH),
-    Member("rename", IO, result=PATH),
-    Member("replace", IO, result=PATH),
+    Member("rename", IO, result=PATH, paths=True),
+    Member("replace", IO, result=PATH, paths=True),
     # -- extended status queries (pathlib/universal-pathlib) ----------------
     # Special-file and mount tests; delegate-or-raise (a driver without the
     # concept -- most cloud backends -- reports it as unsupported).
@@ -160,14 +167,18 @@ IO_MEMBERS = (
     Member("group", IO, normalize=(("follow_symlinks", True),)),
     # -- links --------------------------------------------------------------
     Member(
-        "symlink_to", IO, normalize=(("target_is_directory", False),)
+        "symlink_to", IO, normalize=(("target_is_directory", False),),
+        paths=True,
     ),
     # hardlink_to synthesizes from os.link for a local driver that lacks it
     # (stdlib pathlib gained it in 3.10).
-    Member("hardlink_to", IO, fallback="hardlink_to"),
+    Member("hardlink_to", IO, fallback="hardlink_to", paths=True),
     # link_to was deprecated in 3.10 and removed in 3.12; kept for backward
     # compatibility and synthesized from hardlink_to where pathlib dropped it.
-    Member("link_to", IO, fallback="link_to", needs=("hardlink_to",)),
+    Member(
+        "link_to", IO, fallback="link_to", needs=("hardlink_to",),
+        paths=True,
+    ),
     # -- cloud transfer and cache (cloudpathlib) ----------------------------
     # as_url synthesizes from as_uri (a plain URI) where the driver lacks it.
     # download_to/upload_from/clear_cache are cache operations with no generic
@@ -176,8 +187,8 @@ IO_MEMBERS = (
     # is re-wrapped; upload_from returns the uploaded path in this driver's
     # family, so it is re-wrapped like any other path result.
     Member("as_url", IO, fallback="as_url", needs=("as_uri",)),
-    Member("download_to", IO),
-    Member("upload_from", IO, result=PATH),
+    Member("download_to", IO, paths=True),
+    Member("upload_from", IO, result=PATH, paths=True),
     Member("clear_cache", IO),
 )
 

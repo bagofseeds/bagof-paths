@@ -28,6 +28,7 @@ from pathlib import Path as LocalPath
 import typing_extensions as tx
 
 from . import _select
+from ._args import is_url, path_arg
 from ._constants import (
     ACCESSOR_MEMBERS,
     ADAPTER_MEMBERS,
@@ -249,15 +250,12 @@ class BaseWrapper:
         A string is turned into a path *through the wrapped object* so its
         driver configuration (UPath storage options, a cloudpathlib client)
         carries onto the target; a string naming a different scheme is
-        refused, the same way the constructor refuses one.
+        refused, the same way the constructor refuses one. A plain
+        `os.PathLike` is read as its string; `bytes` is refused.
         """
-        if isinstance(target, BaseWrapper):
-            return target._wrapped
+        target = path_arg(target)
         if isinstance(target, str):
-            match = SCHEME_RE.match(target)
-            if match and canonical_scheme(match.group(1)) != canonical_scheme(
-                self.protocol
-            ):
+            if not self._same_scheme(target):
                 raise ValueError(
                     f"a target like {target!r} names a different scheme; "
                     "pass a wrapped path instead of a string"
@@ -267,6 +265,45 @@ class BaseWrapper:
                 return wrapped.with_segments(target)
             return type(wrapped)(target)
         return target
+
+    def _same_scheme(self, text: str) -> bool:
+        """Whether a string names this path's scheme, or no scheme at all."""
+        match = SCHEME_RE.match(text)
+        if match is None:
+            return True
+        return canonical_scheme(match.group(1)) == canonical_scheme(
+            self.protocol
+        )
+
+    def _join_args(
+        self, segments: tx.Tuple[tx.Any, ...]
+    ) -> tx.Tuple[tx.Self, tx.Tuple[tx.Any, ...]]:
+        """The base and the remaining segments of a join, as pathlib reads it.
+
+        Each segment is coerced like any path argument. On a remote path a
+        URL string names a location of its own, as an absolute path does in
+        `pathlib`: the join restarts from it (built through this path's
+        driver, so its configuration carries over), exactly as it does for
+        the same URL given as a wrapped path. A URL of another scheme is
+        refused. A local path keeps `pathlib`'s reading of such a string.
+        """
+        base = self
+        rest: tx.List[tx.Any] = []
+        remote = not self.is_local()
+        for segment in segments:
+            segment = path_arg(segment)
+            if remote and isinstance(segment, str) and is_url(segment):
+                if not self._same_scheme(segment):
+                    raise ValueError(
+                        f"cannot join {segment!r} onto a "
+                        f"{self.protocol + '://'!r} path: it names a "
+                        "different scheme"
+                    )
+                base = self.with_wrapped(self._coerce_target(segment))
+                rest = []
+            else:
+                rest.append(segment)
+        return base, tuple(rest)
 
     # -- the path without its URL query -----------------------------------
     def _query_free(self) -> tx.Self:
@@ -330,12 +367,15 @@ class BaseWrapper:
         return store(self.protocol) == store(theirs)
 
     def _query_free_arg(self, other: tx.Any) -> tx.Any:
-        """A path argument without its URL query, as `_query_free` does."""
-        if isinstance(other, BaseWrapper):
-            return other._query_free()
+        """A path argument without its URL query, as `_query_free` does.
+
+        A driver object is read as a path of this kind, so its query is left
+        out as a string's or a wrapper's is.
+        """
+        other = path_arg(other)
         if isinstance(other, str):
             return self._query_free_text(other)
-        return other
+        return self.with_wrapped(other)._query_free()._wrapped
 
     # -- location (generic; refined per-driver by the adapter layer) --------
     @property
@@ -539,14 +579,30 @@ class BaseWrapper:
             ),
         )
 
+    def __bytes__(self) -> bytes:
+        """The local file name as bytes, as `os.fsencode` gives it.
+
+        Only a local path has one; a remote path raises.
+        """
+        if self.is_local():
+            return os.fsencode(os.fspath(self._wrapped))
+        raise UnsupportedPathOperation(
+            "__bytes__",
+            driver=self._wrapped,
+            hint=(
+                "a non-local path has no local file name to encode; use "
+                "str(path).encode() for the URL"
+            ),
+        )
+
     def __truediv__(self, other: tx.Any) -> tx.Self:
-        if isinstance(other, BaseWrapper):
-            other = other._wrapped
-        return self.with_wrapped(self._query_free()._wrapped / other)
+        base, rest = self._join_args((other,))
+        if not rest:
+            return base
+        return base.with_wrapped(base._query_free()._wrapped / rest[0])
 
     def __rtruediv__(self, other: tx.Any) -> tx.Self:
-        if isinstance(other, BaseWrapper):
-            other = other._wrapped
+        other = path_arg(other)
         return self.with_wrapped(other / self._wrapped)
 
 
