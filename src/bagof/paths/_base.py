@@ -37,7 +37,7 @@ from ._constants import (
     STAGED_MEMBERS,
 )
 from ._detect import is_async_driver
-from ._errors import UnsupportedPathOperation
+from ._errors import NoLocalPathError, UnsupportedPathOperation
 from ._protocols import (
     canonical_scheme,
     merged_storage_options,
@@ -411,7 +411,8 @@ class BaseWrapper:
         True for a plain path and for a `file://` URL; false for a remote
         URL. It reads only the path, never storage. A local path is the one
         `os.fspath` accepts, so it can be handed to a library that opens
-        files by name.
+        files by name; on any other path `os.fspath` raises
+        [`NoLocalPathError`][bagof.paths.NoLocalPathError], a `TypeError`.
 
         ```pycon
         >>> Path("/data/scan.nii").is_local()
@@ -530,7 +531,7 @@ class BaseWrapper:
     def __fspath__(self) -> str:
         if self.is_local():
             return os.fspath(self._wrapped)
-        raise UnsupportedPathOperation(
+        raise NoLocalPathError(
             "__fspath__",
             driver=self._wrapped,
             hint=(

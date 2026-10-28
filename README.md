@@ -67,6 +67,7 @@ load("s3://my-bucket/train.bin")
 
 Some libraries open files only by name. `is_local()` tells you whether a path
 is a local file you can hand to them; it reads only the path, never storage.
+On a remote path `os.fspath` raises `NoLocalPathError`, a `TypeError`.
 
 ```pycon
 >>> from bagof.paths import Path

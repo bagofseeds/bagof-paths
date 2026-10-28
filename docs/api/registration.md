@@ -48,4 +48,6 @@ p.name        # 'scan.nii.gz'
 
 ## ::: bagof.paths.UnsupportedPathOperation
 
+## ::: bagof.paths.NoLocalPathError
+
 ## ::: bagof.paths.CommitError

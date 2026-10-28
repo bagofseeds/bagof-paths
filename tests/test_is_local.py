@@ -11,7 +11,13 @@ import pathlib
 
 import pytest
 
-from bagof.paths import AsyncPath, Path, PurePath, UnsupportedPathOperation
+from bagof.paths import (
+    AsyncPath,
+    NoLocalPathError,
+    Path,
+    PurePath,
+    UnsupportedPathOperation,
+)
 
 FRONTS = [PurePath, Path, AsyncPath]
 
@@ -90,3 +96,49 @@ def test_is_local_is_synchronous_on_async_path() -> None:
     result = AsyncPath("/tmp/x").is_local()
     assert result is True
     assert not asyncio.iscoroutine(result)
+
+
+# -- os.fspath on a remote path raises NoLocalPathError, a TypeError (#23) --
+
+
+@pytest.mark.parametrize("cls", FRONTS)
+@pytest.mark.parametrize("text", ["s3://bucket/x.nii", "https://host/x.nii"])
+def test_fspath_on_remote_raises_no_local_path_error(
+    cls: type, text: str
+) -> None:
+    p = cls(text)
+    with pytest.raises(NoLocalPathError) as info:
+        os.fspath(p)
+    assert isinstance(info.value, TypeError)
+    assert isinstance(info.value, UnsupportedPathOperation)
+    assert isinstance(info.value, NotImplementedError)
+    assert "'__fspath__' is not supported" in str(info.value)
+
+
+@pytest.mark.parametrize("cls", [Path, AsyncPath])
+def test_fspath_probe_on_memory_path(cls: type) -> None:
+    # The issue's case: the usual probe falls through to the remote branch.
+    pytest.importorskip("upath")
+    p = cls("memory://bucket/x.nii")
+    try:
+        name = os.fspath(p)
+    except TypeError:
+        name = None
+    assert name is None
+
+
+@pytest.mark.parametrize("cls", FRONTS)
+def test_fspath_probe_on_local_path(cls: type, tmp_path: pathlib.Path) -> None:
+    p = cls(tmp_path / "x.nii")
+    try:
+        name = os.fspath(p)
+    except TypeError:  # pragma: no cover - a local path has a file name
+        name = None
+    assert name == str(tmp_path / "x.nii")
+
+
+def test_no_local_path_error_is_public() -> None:
+    import bagof.paths
+
+    assert "NoLocalPathError" in bagof.paths.__all__
+    assert bagof.paths.NoLocalPathError is NoLocalPathError
