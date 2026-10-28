@@ -554,7 +554,10 @@ registry.
     SIGBUS; after `os.replace` the map kept reading the old content, and an
     open reader kept the old bytes. Replacing is what keeps readers safe.
 
-  Commit: nothing staged leaves the target as it was (silently); a file over
+  Commit: nothing staged leaves the target as it was (silently: a caller
+  that hands the staged path to a library which may write nothing checks
+  `tmp.exists()` before leaving the block, one line that raises where the
+  failure is, so there is no option for it, #48); a file over
   a file is one `os.replace` after `fsync`, then the directory is fsynced
   (atomic on POSIX); a directory or a change of type moves the old entry
   aside *into* the staging directory (same file system) and the new one in,

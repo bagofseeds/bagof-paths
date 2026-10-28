@@ -255,6 +255,17 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
             zarr.save(tmp, data)       # a local directory, uploaded on exit
         ```
 
+        Staging nothing is not an error. When a library may fail quietly or
+        write somewhere else, check that it made something before leaving
+        the block; raising there leaves this path as it was:
+
+        ```python
+        with Path("out/scan.nii.gz").staged() as tmp:
+            nibabel.save(image, tmp)
+            if not tmp.exists():
+                raise FileNotFoundError(f"nothing was written to {tmp.name}")
+        ```
+
         `copy=True` starts the staged version as a copy of this path (a
         file, or a whole directory), for jobs that update it in place: zarr
         in `"r+"` mode, h5py in `"a"` mode, appending. On a remote path that
