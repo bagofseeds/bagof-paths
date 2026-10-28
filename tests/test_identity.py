@@ -168,6 +168,42 @@ def test_other_types_are_not_comparable() -> None:
     assert Path("/a/b") != 1
 
 
+class _BadFspath:
+    """An os.PathLike whose __fspath__ fails or returns no text."""
+
+    def __init__(self, result: object) -> None:
+        self._result = result
+
+    def __fspath__(self) -> object:
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+@pytest.mark.parametrize(
+    "result", [TypeError("no name"), b"/a/b"], ids=["raises", "bytes"]
+)
+def test_a_path_like_without_a_text_name_is_not_comparable(
+    result: object,
+) -> None:
+    other = _BadFspath(result)
+    assert Path("/a/b").__eq__(other) is NotImplemented
+    assert Path("/a/b") != other
+
+
+class _Unwrappable:
+    """Looks like a driver (it has ``parts``) but has no readable location."""
+
+    parts = ("a", "b")
+
+    def __str__(self) -> str:
+        raise ValueError("no location")
+
+
+def test_a_driver_lookalike_that_cannot_be_wrapped_is_not_comparable() -> None:
+    assert Path("/a/b").__eq__(_Unwrappable()) is NotImplemented
+
+
 def test_a_remote_path_never_equals_a_local_one() -> None:
     assert Path("s3://b/k") != pathlib.PurePosixPath("s3://b/k")
     assert Path("s3://b/k") != pathlib.PurePosixPath("b/k")

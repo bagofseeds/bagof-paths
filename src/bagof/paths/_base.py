@@ -806,7 +806,7 @@ def _local_flavour(wrapped: tx.Any) -> tx.Type[pathlib.PurePath]:
         return pathlib.PureWindowsPath
     if isinstance(wrapped, pathlib.PurePosixPath):
         return pathlib.PurePosixPath
-    if os.name == "nt":
+    if os.name == "nt":  # pragma: no cover - exercised on Windows only
         return pathlib.PureWindowsPath
     return pathlib.PurePosixPath
 
