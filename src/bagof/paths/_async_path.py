@@ -347,7 +347,24 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- status queries ----------------------------------------------------
     async def exists(self, *, follow_symlinks: bool = True) -> bool:
-        """Whether the path exists."""
+        """Whether the path exists.
+
+        As with `pathlib`, an error other than "not found" propagates.
+        In particular, a name too long for the file system raises
+        `OSError` (`ENAMETOOLONG`), where `os.path.exists` would return
+        `False`. To treat such a name as missing, catch it:
+
+        ```python
+        import errno
+
+        try:
+            found = await path.exists()
+        except OSError as e:
+            if e.errno != errno.ENAMETOOLONG:
+                raise
+            found = False
+        ```
+        """
         return await self._call(
             "exists", (), {"follow_symlinks": follow_symlinks}
         )
