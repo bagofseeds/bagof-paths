@@ -68,8 +68,9 @@ PURE_PATH_MEMBERS = (
     Member(
         "with_segments", result=PATH, fallback="with_segments"
     ),
-    # is_reserved is lexical (Windows device names); delegate-or-raise.
-    Member("is_reserved"),
+    # is_reserved is lexical (Windows device names). pathlib removed it in
+    # 3.15, so synthesize it from ntpath.isreserved where the driver lacks it.
+    Member("is_reserved", fallback="is_reserved"),
     # joinuri joins a URI onto the path (universal-pathlib); delegate-or-raise.
     Member("joinuri", result=PATH),
     # match / full_match are not delegated: they are computed lexically on the

@@ -14,7 +14,9 @@ The engine looks a fallback up by name (the `fallback` field of a spec
 from __future__ import annotations
 
 import io
+import ntpath
 import os
+import pathlib
 
 import typing_extensions as tx
 
@@ -151,6 +153,21 @@ def is_junction(wrapper: tx.Any) -> bool:
     return False
 
 
+def is_reserved(wrapper: tx.Any) -> bool:
+    """`is_reserved` for drivers/versions without it (pathlib dropped it).
+
+    pathlib removed it in Python 3.15. Reserved names (`CON`, `NUL`, ...) are
+    a Windows filesystem concept: a Windows-flavoured path is tested with
+    `ntpath.isreserved` (added in 3.13, the replacement pathlib pointed to),
+    as pathlib tested it; a POSIX path or a remote key is never reserved.
+    """
+    wrapped = wrapper._wrapped
+    isreserved = getattr(ntpath, "isreserved", None)
+    if isreserved is not None and isinstance(wrapped, pathlib.PureWindowsPath):
+        return isreserved(str(wrapped))
+    return False
+
+
 def as_url(wrapper: tx.Any, **kwargs: tx.Any) -> str:
     """`as_url` from `as_uri`.
 
@@ -194,6 +211,7 @@ FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
     "with_segments": with_segments,
     "hardlink_to": hardlink_to,
     "is_junction": is_junction,
+    "is_reserved": is_reserved,
     "link_to": link_to,
     "as_url": as_url,
 }
