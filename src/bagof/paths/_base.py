@@ -629,6 +629,42 @@ class BaseWrapper:
             return hash(key[2](key[1]))
         return hash(key)
 
+    # -- pathlib 3.14+ interoperability -------------------------------------
+    # pathlib 3.14 takes any argument with `with_segments` for one of its own
+    # paths and reads two private members from it: `relative_to` reads
+    # `_tail`, and `copy`/`copy_into`/`move` call `target._copy_from(...)`.
+    # Both are present, unchanged, from 3.14.0 to the 3.15 development
+    # branch. They are answered here from the public surface only, so that
+    # a wrapper argument behaves as the os.PathLike it is. No earlier
+    # pathlib reads either name.
+    @property
+    def _tail(self) -> tx.List[str]:
+        # pathlib's `_tail`: the parts after the anchor.
+        parts = list(self.parts)
+        return parts[1:] if self.anchor else parts
+
+    def _copy_from(self, source: tx.Any, **kwargs: tx.Any) -> None:
+        # pathlib's `copy` has checked the paths are distinct and calls this
+        # to copy `source` (one of its own paths) here. Copy as it copies to
+        # an os.PathLike: to this path's local file name, by pathlib itself.
+        if not self.is_local():
+            raise NoLocalPathError(
+                "copy",
+                driver=self._wrapped,
+                hint=(
+                    "pathlib copies only to a local file name, and this path "
+                    "is remote"
+                ),
+            )
+        if not isinstance(source, pathlib.Path):
+            raise UnsupportedPathOperation(
+                "copy",
+                driver=source,
+                hint="only a local pathlib path can be copied to this path "
+                "from its own copy() method",
+            )
+        source.copy(source.with_segments(os.fspath(self)), **kwargs)
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}({str(self._wrapped)!r})"
 

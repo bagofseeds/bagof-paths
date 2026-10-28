@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import pathlib
+import sys
 import uuid
 
 import pytest
@@ -522,3 +523,107 @@ def test_our_drivers_restart_a_join_at_a_url(driver: tx.Any) -> None:
     assert str(driver.joinpath("y", "s3://c/d", "e")) == "s3://c/d/e"
     with pytest.raises(ValueError):
         driver.joinpath("gs://c/d")
+
+
+# -- #30 row 7: pathlib 3.14 given one of our paths ------------------------
+# pathlib 3.14 takes any argument with `with_segments` for one of its own
+# paths; a wrapper must then behave as the os.PathLike it is.
+needs_314 = pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="pathlib gained copy/move in 3.14"
+)
+FRONT_ENDS = [Path, AsyncPath, PurePath]
+
+
+@needs_314
+@pytest.mark.parametrize("wrap", FRONT_ENDS)
+def test_pathlib_copies_a_file_to_our_path(
+    tmp_path: pathlib.Path, wrap: tx.Callable
+) -> None:
+    source = tmp_path / "a.txt"
+    source.write_text("data")
+    result = source.copy(wrap(tmp_path / "b.txt"))
+    assert (tmp_path / "b.txt").read_text() == "data"
+    assert result == tmp_path / "b.txt"
+
+
+@needs_314
+def test_pathlib_copies_a_tree_to_our_path(tmp_path: pathlib.Path) -> None:
+    tree = tmp_path / "tree"
+    (tree / "sub").mkdir(parents=True)
+    (tree / "sub" / "x.txt").write_text("x")
+    tree.copy(Path(tmp_path / "copy"), preserve_metadata=True)
+    assert (tmp_path / "copy" / "sub" / "x.txt").read_text() == "x"
+
+
+@needs_314
+def test_pathlib_copy_into_our_directory(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "a.txt"
+    source.write_text("data")
+    (tmp_path / "d").mkdir()
+    result = source.copy_into(Path(tmp_path / "d"))
+    assert (tmp_path / "d" / "a.txt").read_text() == "data"
+    assert result == tmp_path / "d" / "a.txt"
+
+
+@needs_314
+def test_pathlib_copy_to_itself_is_refused(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "a.txt"
+    source.write_text("data")
+    with pytest.raises(OSError):
+        source.copy(Path(source))
+    assert source.read_text() == "data"
+
+
+@needs_314
+def test_pathlib_moves_to_our_path(tmp_path: pathlib.Path) -> None:
+    source = tmp_path / "a.txt"
+    source.write_text("data")
+    (tmp_path / "d").mkdir()
+    source.move(Path(tmp_path / "b.txt"))
+    assert (tmp_path / "b.txt").read_text() == "data"
+    assert not source.exists()
+    (tmp_path / "b.txt").move_into(Path(tmp_path / "d"))
+    assert (tmp_path / "d" / "b.txt").read_text() == "data"
+
+
+@needs_314
+def test_pathlib_copy_to_a_remote_path_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    # pathlib copies only to a local file name, as for any argument that is
+    # not one; a move keeps its source.
+    source = tmp_path / "a.txt"
+    source.write_text("data")
+    with pytest.raises(TypeError):
+        source.copy(PurePath("s3://bucket/a.txt"))
+    with pytest.raises(TypeError):
+        source.move(PurePath("s3://bucket/a.txt"))
+    assert source.read_text() == "data"
+
+
+@needs_314
+def test_our_copy_hook_takes_only_a_local_pathlib_source(
+    tmp_path: pathlib.Path,
+) -> None:
+    with pytest.raises(UnsupportedPathOperation):
+        Path(tmp_path / "b.txt")._copy_from(PurePath("s3://bucket/a.txt"))
+
+
+@needs_314
+@pytest.mark.parametrize("wrap", FRONT_ENDS)
+def test_pathlib_relative_to_our_path(wrap: tx.Callable) -> None:
+    here = pathlib.PurePosixPath("/a/b/c")
+    assert here.relative_to(wrap("/a")) == pathlib.PurePosixPath("b/c")
+    assert here.relative_to(wrap("/a/b/c")) == pathlib.PurePosixPath(".")
+    assert here.relative_to(wrap("/a/x"), walk_up=True) == (
+        pathlib.PurePosixPath("../b/c")
+    )
+    with pytest.raises(ValueError):
+        here.relative_to(wrap("/x"))
+    with pytest.raises(ValueError):
+        here.relative_to(wrap("s3://a"))
+    assert here.is_relative_to(wrap("/a"))
+    assert not here.is_relative_to(wrap("/x"))
+    assert pathlib.PurePosixPath("b/c").relative_to(wrap("b")) == (
+        pathlib.PurePosixPath("c")
+    )

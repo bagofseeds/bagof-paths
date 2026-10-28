@@ -412,6 +412,22 @@ registry.
   consumer evidence). Windows case-insensitivity is explicitly not modeled
   in equality (we compare canonical strings): `Path(PureWindowsPath("C:/A"))`
   does not equal `PureWindowsPath("c:/a")`, though their hashes agree.
+- **A wrapper as a `pathlib` 3.14 argument [settled; #30 row 7].**
+  `pathlib` 3.14 takes any argument with `with_segments` for one of its own
+  paths (`with_segments` is on our surface, so a wrapper qualifies) and
+  then reads two private members: `relative_to` reads `path._tail`, and
+  `copy`/`copy_into`/`move` call `target._copy_from(source, **kwargs)`.
+  Both names are unchanged from 3.14.0 to the 3.15 development branch.
+  The wrapper answers them from its public surface only, so it behaves as
+  the `os.PathLike` it is: `_tail` is the parts after the anchor;
+  `_copy_from` has `pathlib` copy to the local file name
+  (`source.copy(source.with_segments(os.fspath(target)), **kwargs)`), so
+  the copy is `pathlib`'s own. A remote target raises `NoLocalPathError`
+  (a `TypeError`, as `pathlib` raises for an argument with no file name),
+  and `move` then keeps its source; a source that is not a local
+  `pathlib.Path` (a `pathlib_abc` caller) is refused rather than rebuilt
+  in the wrong store. Hiding `with_segments` instead would drop a public
+  member. `anyio.Path` has the same gap upstream.
 - **Dependency-free lexical driver [settled].** With no backend installed, a
   remote URL is backed by a stdlib-only lexical driver (`_pure_driver.py`) that
   reproduces the `(protocol, path)` identity of a real backend so a path means
