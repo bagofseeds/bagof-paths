@@ -565,13 +565,16 @@ registry.
   `fs.put_file`, cloudpathlib's `upload_from`; s3fs/gcsfs/adlfs create the
   object only when the upload completes), a directory file by file, then
   stale objects are deleted (per-file atomic only). A failed commit leaves
-  the target as it was (or restored) and keeps the staged data, past garbage
-  collection, in `CommitError(OSError)`; a dropped stage is cleaned by a
-  finalizer. `copy=True` starts the staged entry as a copy (a download, for
-  a remote target) for read-modify-write jobs. `replace_type=False` refuses
-  a change between file and directory (`CommitError` with `EISDIR` or
-  `ENOTDIR`); the check sits in the commit, just before the old entry is
-  touched, since a directory can appear after any earlier check.
+  the target as it was (or restored), removes the staged data and raises
+  `CommitError(OSError)`; with `keep_on_failure=True` it keeps the data,
+  past garbage collection, for another `commit()` (#46: cleaning up after
+  ourselves is the default, keeping costly work is the opt-in). A dropped
+  stage is cleaned by a finalizer. `copy=True` starts the staged entry as a
+  copy (a download, for a remote target) for read-modify-write jobs.
+  `replace_type=False` refuses a change between file and directory
+  (`CommitError` with `EISDIR` or `ENOTDIR`); the check sits in the commit,
+  just before the old entry is touched, since a directory can appear after
+  any earlier check.
 
   `atomic=` on `write_bytes`, `write_text` and `open` is built on it (`open`
   needs a writing mode; `a`/`r+` start from a copy), and is **the plain
@@ -580,11 +583,9 @@ registry.
   (`IsADirectoryError`, before staging and again at commit), never
   replacing it (#45). A failure, a failed commit included, removes the
   staging directory and raises the error itself, not `CommitError` (#46):
-  the caller still holds its data and has no stage to commit again.
-  `staged()` keeps its defaults: a change of type is a new version, and the
-  data is kept, since its caller may have built something costly; a caller
-  that wants it dropped keeps the `Stage` and `discard()`s it on
-  `CommitError`.
+  the caller still holds its data and has no stage to commit again, so it
+  never keeps it. `staged()` keeps a change of type as a new version unless
+  `replace_type=False`.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has

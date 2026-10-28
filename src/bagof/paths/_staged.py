@@ -346,10 +346,17 @@ class _StageBase:
     # error itself, since the caller has no stage to commit again.
     _atomic: tx.ClassVar[bool] = False
 
-    def __init__(self, target: tx.Any, copy: bool, replace_type: bool) -> None:
+    def __init__(
+        self,
+        target: tx.Any,
+        copy: bool,
+        replace_type: bool,
+        keep_on_failure: bool,
+    ) -> None:
         self._target = target
         self._copy = copy
         self._replace_type = replace_type and not self._atomic
+        self._keep_on_failure = keep_on_failure and not self._atomic
         self._state = _OPEN
         self._dir: tx.Optional[str] = None
         self._entry: tx.Optional[str] = None
@@ -403,8 +410,8 @@ class _StageBase:
             )
 
     def _failed(self, error: BaseException) -> CommitError:
-        # The target is as it was (or restored); keep the staged data, past
-        # garbage collection too, so the work is not lost.
+        # The target is as it was (or restored); with keep_on_failure, keep
+        # the staged data, past garbage collection too, for another commit.
         self._state = _FAILED
         if self._finalizer is not None:
             self._finalizer.detach()
@@ -428,8 +435,9 @@ class Stage(_StageBase):
         *,
         copy: bool = False,
         replace_type: bool = True,
+        keep_on_failure: bool = False,
     ) -> None:
-        super().__init__(target, copy, replace_type)
+        super().__init__(target, copy, replace_type, keep_on_failure)
         self._create()
         if copy:
             try:
@@ -459,8 +467,10 @@ class Stage(_StageBase):
 
         Nothing created means nothing changes. If the move or the upload
         fails, the target is left as it was (or restored), the staged data
-        is kept, and [`CommitError`][bagof.paths.CommitError] says where;
-        `commit` may be called again, or `discard` removes it.
+        is removed, and [`CommitError`][bagof.paths.CommitError] is raised.
+        A stage made with `keep_on_failure=True` keeps the data instead and
+        the error says where; `commit` may then be called again, or
+        `discard` removes it.
         """
         self._check_open()
         try:
@@ -472,10 +482,12 @@ class Stage(_StageBase):
             else:
                 _commit_remote(self._entry, self._target, self._replace_type)
         except Exception as error:
+            if self._keep_on_failure:
+                raise self._failed(error) from error
+            self.discard()
             if self._atomic:
-                self.discard()
                 raise
-            raise self._failed(error) from error
+            raise CommitError(self._target, None, error) from error
         self._state = _COMMITTED
         self._cleanup()
 
@@ -514,8 +526,9 @@ class AsyncStage(_StageBase):
         *,
         copy: bool = False,
         replace_type: bool = True,
+        keep_on_failure: bool = False,
     ) -> None:
-        super().__init__(target, copy, replace_type)
+        super().__init__(target, copy, replace_type, keep_on_failure)
         self._prepared = False
 
     async def _prepare(self) -> AsyncStage:
@@ -585,10 +598,12 @@ class AsyncStage(_StageBase):
                     self._replace_type,
                 )
         except Exception as error:
+            if self._keep_on_failure:
+                raise self._failed(error) from error
+            await self.discard()
             if self._atomic:
-                await self.discard()
                 raise
-            raise self._failed(error) from error
+            raise CommitError(self._target, None, error) from error
         self._state = _COMMITTED
         await bridge.run(self._cleanup)
 
@@ -616,9 +631,9 @@ class AsyncStage(_StageBase):
 # `atomic=True` on `write_bytes`, `write_text` and `open` is the plain write,
 # made atomic: where the staging area would show, it acts as the plain write
 # does. It refuses a directory at the target, and a failure, before or during
-# the commit, leaves nothing behind and raises the error itself. A `staged()`
-# caller keeps the other defaults: a change of type, and the data kept in
-# `CommitError` on a failed commit.
+# the commit, leaves nothing behind and raises the error itself, not
+# `CommitError`. It never keeps its data: the caller still holds it. A
+# `staged()` caller keeps a change of type unless `replace_type=False`.
 class AtomicStage(Stage):
     """The staging area behind `atomic=True`."""
 
