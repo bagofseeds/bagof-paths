@@ -7,6 +7,7 @@ that hide a member) where a driver or Python version lacks it.
 """
 
 import asyncio
+import ntpath
 import os
 import pathlib
 
@@ -83,6 +84,34 @@ def test_is_junction_fallback_local(tmp_path: pathlib.Path) -> None:
 def test_is_junction_fallback_nonlocal() -> None:
     # A non-local driver without the concept is synthesized to False.
     assert Path(_Cloudish()).is_junction() is False
+
+
+# -- is_reserved (lexical; pathlib removed it in 3.15) ----------------------
+def test_is_reserved_fallback_posix(tmp_path: pathlib.Path) -> None:
+    class NoReserved(_Fake):
+        hide = frozenset({"is_reserved"})
+
+    # No native is_reserved: synthesized -- a POSIX name is never reserved.
+    assert Path(NoReserved(tmp_path / "CON")).is_reserved() is False
+
+
+def test_is_reserved_fallback_nonlocal() -> None:
+    assert Path(_Cloudish()).is_reserved() is False
+
+
+@pytest.mark.skipif(
+    not hasattr(ntpath, "isreserved"), reason="ntpath.isreserved is 3.13+"
+)
+def test_is_reserved_fallback_windows_flavour() -> None:
+    from bagof.paths import PurePath
+    from bagof.paths._fallbacks import is_reserved
+
+    def reserved(text: str) -> bool:
+        return is_reserved(PurePath(pathlib.PureWindowsPath(text)))
+
+    # Called directly: on 3.13/3.14 the native member still exists.
+    assert reserved("C:/x/CON") is True
+    assert reserved("C:/x/a.txt") is False
 
 
 # -- with_segments (lexical; synthesized before pathlib 3.12) ---------------

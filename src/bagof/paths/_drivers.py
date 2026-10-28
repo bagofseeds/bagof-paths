@@ -177,14 +177,18 @@ class GenericAdapter:
             # is what pathlib uses), which is also what stops symlink cycles.
             if is_dir and not follow_symlinks and entry.is_symlink():
                 is_dir = False
-            (dirnames if is_dir else filenames).append(entry.name)
+            # The store's own names, as a native walk reports them, so that
+            # entries whose names differ only after a "?" stay apart.
+            (dirnames if is_dir else filenames).append(entry._store_name())
 
         if top_down:
             yield wrapper, dirnames, filenames
         # Re-reads dirnames after the yield, so caller pruning is honored.
+        # Joined through the driver: a directory whose key holds a "?" is
+        # entered at that key, not at the key without its query.
         for name in dirnames:
             yield from self._walk_fallback(
-                wrapper / name,
+                wrapper.with_wrapped(wrapper._wrapped / name),
                 top_down=top_down,
                 on_error=on_error,
                 follow_symlinks=follow_symlinks,

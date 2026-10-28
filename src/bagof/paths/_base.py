@@ -37,10 +37,17 @@ from ._constants import (
 )
 from ._detect import is_async_driver
 from ._errors import UnsupportedPathOperation
-from ._protocols import canonical_scheme, merged_storage_options, traits_for
+from ._protocols import (
+    canonical_scheme,
+    merged_storage_options,
+    path_part,
+    strip_url_query,
+    traits_for,
+)
 from ._spec import BY_NAME
 
 _MISSING = object()
+
 
 
 class BaseWrapper:
@@ -138,22 +145,18 @@ class BaseWrapper:
     def from_uri(cls, uri: str) -> tx.Self:
         """A path from a URI.
 
-        A `file://` URI becomes a local path; a URI of another scheme is
-        built through the ordinary constructor's driver selection, so
-        `Path.from_uri("s3://...")` and `Path("s3://...")` agree.
+        A `file:` URI becomes a local path, read as [pathlib.Path.from_uri][]
+        reads it from Python 3.14 on, on every version: percent-escapes are
+        decoded, and a query or fragment is not part of the path. A URI of
+        another scheme is built through the ordinary constructor's driver
+        selection, so `Path.from_uri("s3://...")` and `Path("s3://...")`
+        agree.
         """
         match = SCHEME_RE.match(uri)
         scheme = match.group(1).lower() if match else ""
-        if scheme and scheme not in LOCAL_PROTOCOLS:
+        if scheme and scheme != "file":
             return cls(uri)
-        # The stdlib is case-sensitive about "file:"; normalise the scheme
-        # (the constructor does the same for a remote URL).
-        if match is not None:
-            uri = scheme + uri[match.end(1):]
-        native = getattr(LocalPath, "from_uri", None)
-        if native is None:  # pathlib gained from_uri in 3.13
-            return cls(_local_from_file_uri(uri))  # pragma: no cover
-        return cls(native(uri))
+        return cls(_local_from_file_uri(uri))
 
     # -- the wrapped object -------------------------------------------------
     @property
@@ -261,6 +264,75 @@ class BaseWrapper:
                 return wrapped.with_segments(target)
             return type(wrapped)(target)
         return target
+
+    # -- the path without its URL query -----------------------------------
+    def _query_free(self) -> tx.Self:
+        """This path without its URL query (and an http fragment).
+
+        The lexical members run on this view, so a query (a token, a version
+        id) is not part of the name, the parts or the parent, and a name
+        moves from one store to another without it. Only an http URL has a
+        fragment; elsewhere a `#` is part of the name.
+        The path itself keeps them, since I/O needs them to reach the
+        object. A derived path does not carry them, as in URL resolution
+        (RFC 3986): it names a different object.
+        """
+        text = self._query_free_text(str(self._wrapped))
+        if text == str(self._wrapped):
+            return self
+        # A driver that cannot rebuild itself from a string keeps its own
+        # answer rather than lose its configuration.
+        rebuilt = self._rebuilt(text)
+        return self if rebuilt is None else rebuilt
+
+    @staticmethod
+    def _query_free_text(text: str) -> str:
+        """A URL string without its query (and an http fragment)."""
+        return path_part(text)
+
+    def _rebuilt(self, text: str) -> tx.Optional[tx.Self]:
+        """This path's driver rebuilt at the URL `text`, or `None`.
+
+        The driver's own `with_segments` carries its configuration (storage
+        options, a client) onto the new path; a driver without one cannot
+        be rebuilt safely.
+        """
+        rebuild = getattr(self._wrapped, "with_segments", None)
+        if not callable(rebuild):
+            return None
+        return self.with_wrapped(rebuild(text))
+
+    def _store_name(self) -> str:
+        """The name the driver itself gives this object.
+
+        In a store whose keys hold `?` (s3, gs, memory, ...), two objects can
+        differ only after it, so an operation that stays in the store names
+        a path this way to keep them apart. `name`, which leaves the query
+        out, is the portable name for another store. A path with no query
+        has one name, so `name` (and any override of it) answers.
+        """
+        if self._query_free() is self:
+            return self.name
+        value = getattr(self._wrapped, "name", None)
+        return value if isinstance(value, str) else self.name
+
+    def _same_store(self, other: tx.Any) -> bool:
+        """Whether the driver path `other` is in this path's store."""
+        def store(protocol: str) -> str:
+            if protocol in LOCAL_PROTOCOLS:
+                return ""
+            return canonical_scheme(protocol)
+
+        theirs = self.with_wrapped(other).protocol
+        return store(self.protocol) == store(theirs)
+
+    def _query_free_arg(self, other: tx.Any) -> tx.Any:
+        """A path argument without its URL query, as `_query_free` does."""
+        if isinstance(other, BaseWrapper):
+            return other._query_free()
+        if isinstance(other, str):
+            return self._query_free_text(other)
+        return other
 
     # -- location (generic; refined per-driver by the adapter layer) --------
     @property
@@ -416,7 +488,7 @@ class BaseWrapper:
     def __truediv__(self, other: tx.Any) -> tx.Self:
         if isinstance(other, BaseWrapper):
             other = other._wrapped
-        return self.with_wrapped(self._wrapped / other)
+        return self.with_wrapped(self._query_free()._wrapped / other)
 
     def __rtruediv__(self, other: tx.Any) -> tx.Self:
         if isinstance(other, BaseWrapper):
@@ -478,34 +550,72 @@ def _reject_local_storage_options(
 
 def _local_from_url(text: str, scheme: str) -> LocalPath:
     """A local path from a `file://` / `local://` URL, on any version."""
-    from urllib.parse import urlparse
-    from urllib.request import url2pathname
-
-    parsed = urlparse(text)
     if scheme == "file":
-        return LocalPath(url2pathname(parsed.path))
-    # local://<netloc><path> -- keep whatever follows the scheme as the path.
-    return LocalPath(url2pathname(parsed.netloc + parsed.path) or ".")
+        return _local_from_file_uri(text)
+    # local:// is fsspec's name for the local filesystem. As in any non-http
+    # URL its query is not part of the path and a "#" is; the rest is read
+    # as it is, with no percent-decoding, as fsspec reads it.
+    text = strip_url_query(text, fragment=False)
+    return LocalPath(text.split("://", 1)[1] or ".")
 
 
-def _local_from_file_uri(uri: str) -> LocalPath:  # pragma: no cover
-    """Build a local path from a `file://` URI on pathlib < 3.13.
+def _local_from_file_uri(uri: str) -> LocalPath:
+    """A local path from a `file:` URI, as pathlib reads it from 3.14 on.
 
-    Only the `file` scheme maps to a local path; anything else needs a
-    driver to interpret it and is refused, the way the constructor refuses a
-    scheme-ful string.
+    A file URI is a URL (RFC 8089): its query and fragment are not part of the
+    path, and a `?` or `#` in a file name is written `%3F` / `%23`, as
+    `as_uri()` writes it. Percent-escapes are decoded with the filesystem
+    encoding. An authority other than this machine names a network share: a
+    UNC path on Windows, an error elsewhere. Earlier Pythons disagree (3.13
+    keeps a literal `?`), so the rules are written here once rather than
+    taken from the running interpreter. Derived from CPython 3.14's
+    `urllib.request.url2pathname` (PSF-licensed; see NOTICE.md).
     """
-    from urllib.parse import urlparse
-    from urllib.request import url2pathname
+    import sys
+    from urllib.parse import unquote, urlsplit
 
-    match = SCHEME_RE.match(uri)
-    scheme = match.group(1).lower() if match else ""
-    if scheme != "file":
+    parts = urlsplit(uri)
+    if parts.scheme != "file":
+        raise ValueError(f"URI does not start with 'file:': {uri!r}")
+    authority, path = parts.netloc, parts.path
+    local = authority in ("", "localhost") or authority == _hostname()
+    if os.name == "nt":  # pragma: no cover - exercised on Windows only
+        if authority[1:2] == ":":
+            path = authority + path  # file://c:/file.txt
+        elif not local:
+            path = "//" + authority + path  # file://server/share/file.txt
+        elif path[:3] == "///":
+            path = path[1:]  # file://///server/share/file.txt
+        else:
+            if path[:1] == "/" and path[2:3] in (":", "|"):
+                path = path[1:]  # the slash before a DOS drive
+            if path[1:2] == "|":
+                path = path[:1] + ":" + path[2:]  # an old-style drive bar
+        path = path.replace("/", "\\")
+    elif not local:
         raise ValueError(
-            f"cannot build a local path from {uri!r}; a URL scheme like "
-            f"{scheme!r} needs a driver to interpret it"
+            f"cannot build a local path from {uri!r}: it names the host "
+            f"{authority!r}, not this machine"
         )
-    return LocalPath(url2pathname(urlparse(uri).path))
+    text = unquote(
+        path,
+        encoding=sys.getfilesystemencoding(),
+        errors=sys.getfilesystemencodeerrors(),
+    )
+    result = LocalPath(text)
+    if not result.is_absolute():
+        raise ValueError(f"URI is not absolute: {uri!r}")
+    return result
+
+
+def _hostname() -> tx.Optional[str]:
+    """This machine's hostname, or `None` when it has none."""
+    import socket
+
+    try:
+        return socket.gethostname()
+    except (OSError, AttributeError):  # pragma: no cover - no hostname
+        return None
 
 
 def _is_path_shaped(obj: tx.Any) -> bool:

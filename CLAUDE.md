@@ -66,6 +66,7 @@ tests/
   test_internals.py, test_drivers.py, test_async.py
   test_parity_gap.py          # the pathlib/UPath/cloud surface parity
   test_driver_selection.py    # URL construction + register_protocol
+  test_url_query.py           # what part of a URL is not the path
   test_parity.py              # sync/async surfaces stay in lockstep
   test_docstrings.py          # every pycon block in a docstring or page
   test_licensing.py
@@ -92,6 +93,20 @@ name would collide.
   wrappers inherit them as the same synchronous methods. IO members are the
   only thing written twice (a sync method on `Path`, an async one on
   `AsyncPath`); `test_parity.py` fails the moment the two drift.
+- **A remote URL's query is never part of its name** (issue #17, design
+  §5). An unencoded `?` starts the query on every remote scheme (`query`
+  trait, on by default); a `#` starts a fragment only on `http(s)`
+  (`fragment` trait), elsewhere it is a character of the name. The lexical
+  members run on `BaseWrapper._query_free()` (`_protocols.path_part`), the
+  driver rebuilt via its own `with_segments`. This is deliberate even where
+  a backend keeps `?` in a key (s3, gs, memory): names must move *across*
+  stores. The string, `.path`, identity and I/O keep the query; a derived
+  path drops it; `without_query()` returns the whole path without it. Where
+  the wrapper builds a path from a name inside one store (`copy_into`,
+  `move_into`, the fallback `walk`) it uses `_store_name()`, so two keys
+  differing only after a `?` are never merged. Local paths keep `?`/`#`;
+  `file:` URIs follow Python 3.14's `from_uri` on every version
+  (`_local_from_file_uri`), never the running pathlib.
 - **`_drivers.py` absorbs the operations backends genuinely disagree on** —
   `rmdir` recursion, native `copy`/`move`, `walk` — behind adapters selected
   by driver type. A `GenericAdapter` duck-types any driver; named subclasses

@@ -167,6 +167,16 @@ class PureCloudPath:
     def with_suffix(self, suffix: str) -> PureCloudPath:
         return self._derive(self._pure.with_suffix(suffix))
 
+    def with_segments(self, *segments: tx.Any) -> PureCloudPath:
+        # As in universal-pathlib, the segments name a location of this
+        # scheme: a scheme-less text is read as following `scheme://`.
+        text = "/".join(str(s) for s in segments)
+        if "://" not in text:
+            text = "{}://{}".format(self._scheme, text.lstrip("/"))
+        match = SCHEME_RE.match(text)
+        scheme = match.group(1).lower() if match else self._scheme
+        return PureCloudPath.from_url(text, scheme, self._options)
+
     def as_posix(self) -> str:
         # A real backend returns the whole URL here, not just the key.
         return str(self)

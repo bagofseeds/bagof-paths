@@ -249,8 +249,14 @@ class Path(PurePathMixin, BaseWrapper):
         follow_symlinks: bool = True,
         preserve_metadata: bool = False,
     ) -> tx.Self:
-        """Copy into `target_dir`, keeping this path's name."""
-        dest = self._coerce_target(target_dir) / self.name
+        """Copy into `target_dir`, keeping this path's name.
+
+        Within the same store the copy keeps the store's own name for the
+        object, query and all, so two objects whose names differ only after
+        a `?` stay apart. Into another store it takes `name`, which leaves
+        the query out.
+        """
+        dest = self._into(target_dir)
         return self.copy(
             dest,
             follow_symlinks=follow_symlinks,
@@ -264,9 +270,18 @@ class Path(PurePathMixin, BaseWrapper):
         return self.with_wrapped(driver_target)
 
     def move_into(self, target_dir: tx.Any) -> tx.Self:
-        """Move into `target_dir`, keeping this path's name."""
-        dest = self._coerce_target(target_dir) / self.name
-        return self.move(dest)
+        """Move into `target_dir`, keeping this path's name.
+
+        The name follows the same rule as in `copy_into`.
+        """
+        return self.move(self._into(target_dir))
+
+    def _into(self, target_dir: tx.Any) -> tx.Any:
+        """This path's name placed in `target_dir`, as a driver path."""
+        directory = self._coerce_target(target_dir)
+        if self._same_store(directory):
+            return directory / self._store_name()
+        return directory / self.name
 
     # -- traversal ---------------------------------------------------------
     def walk(

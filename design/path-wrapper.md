@@ -379,6 +379,89 @@ registry.
     real paths and differs only for these pathological spellings. Reproducing
     the raw form lexically is not possible without re-implementing each
     backend's `_strip_protocol`, so this is a documented residual divergence.
+- **A URL's query is not part of its name [settled, owner].** Measured
+  against universal-pathlib 0.3.10, cloudpathlib 0.26.0, fsspec/s3fs
+  2026.9.0, gcsfs 2026.10.1 and adlfs 2026.8.0, by the key or request each
+  backend's I/O actually addresses:
+
+  | URL | fsspec I/O addresses | cloudpathlib | UPath `name` | **wrapper `name`** |
+  |---|---|---|---|---|
+  | `https://h/d/x.gz?t=1#f` | sends `/d/x.gz?t=1`, never the fragment | `HttpPath.name == 'x.gz'` | `'x.gz?t=1#f'` | `'x.gz'` |
+  | `https://h/d/x.gz?s=a/b.zip` | sends the query whole | `'x.gz'` | `'b.zip'` | `'x.gz'` |
+  | `s3://b/d/x.gz?versionId=v` | key `d/x.gz`, version `v` | key `d/x.gz?versionId=v` | `'x.gz?versionId=v'` | `'x.gz'` |
+  | `s3://b/d/x?version=2` | key `d/x?version=2` | same key | same | `'x'` |
+  | `s3://b/d/Invoice #12.pdf` | key as written | same | same | `'Invoice #12.pdf'` |
+  | `gs://b/d/x.gz?generation=123` | key `d/x.gz`, generation 123 (version-aware) | key with the query | `'x.gz?generation=123'` | `'x.gz'` |
+  | `gs://b/d/x.gz#123` | key `d/x.gz`, generation 123 (version-aware) | key `d/x.gz#123` | `'x.gz#123'` | `'x.gz#123'` |
+  | `az://c/d/x.gz?versionid=v` | key `d/x.gz`, version `v` | (needs credentials) | `'x.gz?versionid=v'` | `'x.gz'` |
+  | `memory://d/x#1?q=1`, `zip://`, ... | key as written | — | same | `'x#1'` |
+
+  The backends answer per scheme, so a name faithful to each store would
+  change with the store, and the owner's use case is working *across*
+  stores: copying local to cloud, naming a local output after a cloud
+  input. The rule is therefore one for every remote URL:
+
+  - **An unencoded `?` starts the query.** That is RFC 3986's generic
+    syntax, and `s3://` (which has no formal specification) is read the same
+    way by smart_open. S3's own HTTP API agrees: the SDK sends a key's
+    literal `?` as `%3F`, and `?versionId=` is a real query parameter
+    there. A `?` in an object name is legal but rare -- Windows forbids it
+    in file names, S3 lists it as needing special handling, bucket names
+    cannot contain it -- and every report of one is a bug report.
+  - **A `#` starts a fragment only in an `http(s)` URL**, where it is never
+    sent. Everywhere else it is a character of the name: Windows allows it,
+    names like `Invoice #12.pdf` are ordinary, and every store library reads
+    it so. The cost is gcsfs's `#<generation>` shorthand, which stays part
+    of the name; `?generation=` is the query spelling.
+
+  The lexical members (`name`/`stem`/`suffix(es)`/`parts`/`parent(s)`,
+  `match`/`full_match`, `relative_to`, `with_*`, `/`) leave the query (and
+  an http fragment) out. The string, `path`, the identity key and every I/O
+  call keep it, since a token or version id may be what reaches the object.
+  A derived path drops it, as `urljoin` and cloudpathlib's `HttpPath` do: it
+  names a different object. `without_query()` returns the whole path
+  without it. Both delimiters are protocol traits (`query`, on for every
+  scheme; `fragment`, on for `http`/`https`), so a store whose keys hold a
+  literal `?` opts out with `register_protocol(scheme, query=False)`.
+
+  The cost, accepted: in a store, two keys that differ only after a `?`
+  (`d/x?v=1`, `d/x?v=2`) share a name, so `parent / child.name` does not
+  reach the child. Where the wrapper itself builds a path from a name --
+  `copy_into`/`move_into` within one store, the fallback `walk` -- it uses
+  the store's own name, so it never merges two such objects (measured
+  before the fix on `memory://`: three objects in, two out). Two gaps are
+  left for a follow-up: no URL spelling reaches a key that does contain a
+  `?` (no backend decodes `%3F`), and `?VersionId=` (boto3's capitalisation)
+  is not the `?versionId=` s3fs understands, so it reads a missing key.
+
+  The view is rebuilt through the driver's own `with_segments`, so its
+  configuration (storage options, a client) rides along; a driver without
+  one keeps its own answer, and `without_query()` raises for it.
+
+  No path library has a query API (pathlib, UPath and cloudpathlib offer
+  only `with_name`/`with_stem`/`with_suffix`/`with_segments`); the URL
+  libraries do (yarl `with_query(None)`/`with_fragment(None)`/
+  `without_query_params`, httpx `copy_with(query=None)`, furl
+  `remove(query=...)`). Getters and setters for the query are not offered
+  yet.
+
+  **File URIs [settled].** A `file:` URI is a URL (RFC 8089): Python 3.14's
+  `Path.from_uri` (`url2pathname(require_scheme=True)`, "Discard query and
+  fragment") reads `file:///tmp/x?.nii` as `/tmp/x`, and `as_uri()` writes a
+  `?` in a name as `%3F`; 3.13's `from_uri`, universal-pathlib and fsspec
+  read it literally. The wrapper follows 3.14 on every version -- one
+  implementation for `Path(url)`, `Path.from_uri` and `PurePath`, checked
+  against 3.14's `from_uri` -- since delegating to the running pathlib made
+  the answer version-dependent. That also refuses a non-local authority
+  (`file://host/share/x`), which was silently read as `/share/x`.
+  `local://` is fsspec's name for the local filesystem; as in any non-http
+  URL its query is not part of the path and a `#` is, and the rest is read
+  as fsspec reads it, without percent-decoding.
+
+  Measuring this also showed the native async driver building its filesystem
+  without fsspec's `_get_kwargs_from_urls`, so `AsyncPath("s3://...?versionId=v")`
+  read the *latest* version where `Path` read `v`; it now merges those options
+  under the caller's, as UPath does.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/
