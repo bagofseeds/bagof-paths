@@ -9,6 +9,7 @@ leaves the target as it was. A remote target is staged locally and uploaded.
 import asyncio
 import errno
 import gc
+import io
 import os
 import pathlib
 import stat
@@ -367,6 +368,64 @@ def test_atomic_open_modes_that_do_not_write(tmp_path: pathlib.Path) -> None:
         handle.write("created")
     assert (tmp_path / "new.txt").read_text() == "created"
     assert _listing(tmp_path) == ["new.txt", "x.txt"]
+
+
+# -- an atomic file passes as a file (issue #59) ------------------------------
+# Libraries tell an open file from a file name with isinstance(x, io.IOBase)
+# (nibabel), or with a runtime-checkable protocol.
+@tx.runtime_checkable
+class _Writable(tx.Protocol):
+    def write(self, data: tx.Any) -> tx.Any: ...
+
+
+@pytest.mark.parametrize(
+    "mode, buffering, kind",
+    [
+        ("w", -1, io.TextIOBase),
+        ("a", -1, io.TextIOBase),
+        ("wb", -1, io.BufferedIOBase),
+        ("r+b", -1, io.BufferedIOBase),
+        ("wb", 0, io.RawIOBase),
+    ],
+)
+def test_an_atomic_file_is_an_io_file(
+    tmp_path: pathlib.Path, mode: str, buffering: int, kind: type
+) -> None:
+    (tmp_path / "x.bin").write_bytes(b"")
+    with Path(tmp_path / "x.bin").open(
+        mode, buffering=buffering, atomic=True
+    ) as handle:
+        assert isinstance(handle, io.IOBase)
+        assert isinstance(handle, kind)
+        others = {io.TextIOBase, io.BufferedIOBase, io.RawIOBase} - {kind}
+        assert not any(isinstance(handle, other) for other in others)
+        assert isinstance(handle, _Writable)
+        assert handle.writable()
+        handle.write("ab" if kind is io.TextIOBase else b"ab")
+    assert (tmp_path / "x.bin").read_bytes() == b"ab"
+
+
+def test_an_atomic_file_reaches_a_library_as_a_file(
+    tmp_path: pathlib.Path,
+) -> None:
+    def save(fileish: tx.Any) -> None:
+        if isinstance(fileish, io.IOBase):
+            fileish.write(b"saved")
+        else:
+            raise TypeError(f"not a file: {fileish!r}")
+
+    with Path(tmp_path / "x.bin").open("wb", atomic=True) as handle:
+        save(handle)
+    assert (tmp_path / "x.bin").read_bytes() == b"saved"
+
+
+def test_an_atomic_file_iterates_its_lines(tmp_path: pathlib.Path) -> None:
+    (tmp_path / "x.txt").write_text("a\nb\n")
+    with Path(tmp_path / "x.txt").open("r+", atomic=True) as handle:
+        assert next(handle) == "a\n"
+        assert list(handle) == ["b\n"]
+        handle.write("c\n")
+    assert (tmp_path / "x.txt").read_text() == "a\nb\nc\n"
 
 
 # -- capabilities -------------------------------------------------------------

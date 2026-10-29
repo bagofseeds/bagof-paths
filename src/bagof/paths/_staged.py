@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import io
 import os
 import posixpath
 import shutil
@@ -829,8 +830,32 @@ def exists_error(target: tx.Any) -> FileExistsError:
     return FileExistsError(code, os.strerror(code), str(target))
 
 
+def _forward(name: str) -> tx.Any:
+    def method(self: AtomicFile, *args: tx.Any, **kwargs: tx.Any) -> tx.Any:
+        return getattr(self._handle, name)(*args, **kwargs)
+
+    method.__name__ = method.__qualname__ = name
+    return method
+
+
 class AtomicFile:
-    """A file object whose clean close commits a staged write."""
+    """A file object whose clean close commits a staged write.
+
+    It passes as the `io` class of the file it holds (`io.TextIOBase`,
+    `io.BufferedIOBase` or `io.RawIOBase`), so a library that tells an open
+    file from a file name with `isinstance` takes it as a file (#59). It is
+    registered as one rather than derived from one: `io.IOBase` would bring
+    methods of its own, and a `__del__` that would commit a half-written
+    file.
+    """
+
+    def __new__(cls, handle: tx.Any, stage: Stage) -> AtomicFile:
+        if cls is AtomicFile:
+            for kind, atomic_kind in _ATOMIC_KINDS:
+                if isinstance(handle, kind):
+                    cls = atomic_kind
+                    break
+        return super().__new__(cls)
 
     def __init__(self, handle: tx.Any, stage: Stage) -> None:
         self._handle = handle
@@ -840,8 +865,29 @@ class AtomicFile:
     def __getattr__(self, name: str) -> tx.Any:
         return getattr(self._handle, name)
 
+    # The members every `io` file has are defined here, not only reached
+    # through `__getattr__`: a runtime-checkable protocol looks for them on
+    # the class (`inspect.getattr_static`, Python 3.12+).
+    read = _forward("read")
+    readline = _forward("readline")
+    readlines = _forward("readlines")
+    write = _forward("write")
+    writelines = _forward("writelines")
+    seek = _forward("seek")
+    tell = _forward("tell")
+    truncate = _forward("truncate")
+    flush = _forward("flush")
+    fileno = _forward("fileno")
+    isatty = _forward("isatty")
+    readable = _forward("readable")
+    writable = _forward("writable")
+    seekable = _forward("seekable")
+
     def __iter__(self) -> tx.Iterator[tx.Any]:
         return iter(self._handle)
+
+    def __next__(self) -> tx.Any:
+        return next(self._handle)
 
     @property
     def closed(self) -> bool:
@@ -871,6 +917,29 @@ class AtomicFile:
             self.close()
         else:
             self._abort()
+
+
+class AtomicTextFile(AtomicFile):
+    pass
+
+
+class AtomicBufferedFile(AtomicFile):
+    pass
+
+
+class AtomicRawFile(AtomicFile):
+    pass
+
+
+io.TextIOBase.register(AtomicTextFile)
+io.BufferedIOBase.register(AtomicBufferedFile)
+io.RawIOBase.register(AtomicRawFile)
+
+_ATOMIC_KINDS = (
+    (io.TextIOBase, AtomicTextFile),
+    (io.BufferedIOBase, AtomicBufferedFile),
+    (io.RawIOBase, AtomicRawFile),
+)
 
 
 class AsyncAtomicFile:
