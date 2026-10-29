@@ -97,35 +97,45 @@ def _inside(name: tx.Any, directory: str) -> bool:
     )
 
 
-def _naming_target(error: BaseException, stage: _StageBase) -> BaseException:
-    """`error` as writing the target itself would raise it.
+def _target_name(name: tx.Any, stage: _StageBase) -> tx.Any:
+    """The path that `name`, if it lies in the staging directory, stands
+    for at the target; any other name is returned as it is.
 
-    An `OSError` that names an entry of the staging directory names the
-    target instead: the caller never saw the staging directory, and it is
-    gone by the time the error is read. Anything else is returned as it is.
+    The staged entry stands for the target, a path below it for the same
+    path below the target, and anything else in the staging directory (a
+    library's own temporary file beside the entry) for the same name beside
+    the target.
     """
     directory = stage._dir
-    if (
-        directory is None
-        or not isinstance(error, OSError)
-        or error.errno is None
-        or not (
-            _inside(error.filename, directory)
-            or _inside(error.filename2, directory)
-        )
-    ):
-        return error
-    args: tx.Tuple[tx.Any, ...] = (
-        error.errno, error.strerror, str(stage._target)
-    )
-    winerror = getattr(error, "winerror", None)
-    if winerror is not None:  # pragma: no cover - Windows only
-        args += (winerror,)
-    try:
-        named = type(error)(*args)
-    except Exception:  # pragma: no cover - an OSError with another signature
-        return error
-    return named.with_traceback(error.__traceback__)
+    if directory is None or not _inside(name, directory):
+        return name
+    parts = [part for part in name[len(directory):].split(os.sep) if part]
+    target = stage._target
+    if parts[:1] != [os.path.basename(stage._entry)]:
+        return str(target.parent.joinpath(*parts))
+    return str(target.joinpath(*parts[1:])) if parts[1:] else str(target)
+
+
+def _name_target(error: BaseException, stage: _StageBase) -> None:
+    """Make `error` name the target rather than the staging directory.
+
+    An `OSError` that names an entry of the staging directory names the
+    matching path at the target instead: that is the path its caller means,
+    and the staging directory is gone by the time the error is read. The
+    error is changed in place, so its type, traceback and any attribute of
+    its own are kept. Anything else is left as it is.
+    """
+    if not isinstance(error, OSError):
+        return
+    filename = _target_name(error.filename, stage)
+    filename2 = _target_name(error.filename2, stage)
+    if (filename, filename2) == (error.filename, error.filename2):
+        return
+    if stage._atomic:
+        # A plain write names one path, the target: never the commit's own
+        # move of the staged file onto it.
+        filename, filename2 = str(stage._target), None
+    error.filename, error.filename2 = filename, filename2
 
 
 def reraise_naming_target(
@@ -133,10 +143,8 @@ def reraise_naming_target(
 ) -> tx.NoReturn:
     """Re-raise `error` (inside the `except` that caught it), naming the
     target rather than the staging directory."""
-    named = _naming_target(error, stage)
-    if named is error:
-        raise error
-    raise named from None
+    _name_target(error, stage)
+    raise error
 
 
 class _TargetChanged(Exception):
@@ -645,6 +653,8 @@ class Stage(_StageBase):
             self.commit()
         else:
             self.discard()
+            # The staged path is gone: name the path the caller asked for.
+            _name_target(exc, self)
 
 
 class AsyncStage(_StageBase):
@@ -766,6 +776,8 @@ class AsyncStage(_StageBase):
             await self.commit()
         else:
             await self.discard()
+            # The staged path is gone: name the path the caller asked for.
+            _name_target(exc, self)
 
 
 # -- atomic writes ----------------------------------------------------------

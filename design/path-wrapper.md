@@ -604,10 +604,18 @@ registry.
   the caller still holds its data and has no stage to commit again, so it
   never keeps it. An `OSError` that names an entry of the staging directory
   is re-raised naming the target (#47): the caller never saw that
-  directory, and it is gone when the error is read. An error raised while a
-  `staged()` caller writes at the staged path names that path, which is the
-  one it wrote. Making the staging directory is the exception: the caller
-  has not seen it yet, so a failure there names the target on every stage.
+  directory, and it is gone when the error is read. The same holds for an
+  `OSError` leaving a `staged()` block (#60): the stage is discarded by
+  then, so the staged path names nothing, and a caller that handed it to a
+  library shows its users the path they asked for. The staged entry maps to
+  the target, a path below it to the same path below the target, anything
+  else in the staging directory (a library's own temporary file) to the
+  same name beside the target; the atomic writers name the target alone,
+  as a plain write would. The error is changed in place, not rebuilt, so
+  its type, identity, traceback, notes and attributes survive. Inside the
+  block it still names the staged path, which exists there. Making the
+  staging directory names the target on every stage: the caller has not
+  seen it yet.
 
   Not adopted: driver transactions (above); one transaction spanning several
   unrelated files, which cannot be all-or-nothing once the first commit has
