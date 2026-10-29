@@ -1193,8 +1193,7 @@ def test_native_remote_atomic_write_refuses_a_directory(native: str) -> None:
 
 # -- an atomic write's errors name the target (issue #47) ---------------------
 # The caller of atomic= never sees the staging directory, so an error naming
-# one of its entries names the target instead; staged() names the path its
-# caller wrote.
+# one of its entries names the target instead.
 @pytest.mark.parametrize("front", ["sync", "async"])
 def test_a_failed_atomic_commit_names_the_target(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch, front: str
@@ -1274,15 +1273,105 @@ def test_an_error_without_a_staged_name_is_kept_as_it_is(
     assert _listing(tmp_path) == []
 
 
-def test_staged_errors_name_the_staged_path(tmp_path: pathlib.Path) -> None:
-    # The caller wrote at the staged path, so that is the path named.
-    target = Path(tmp_path / "z.bin")
+# -- an error leaving a staged() block names the target (issue #60) ----------
+# The stage is discarded by then, so the staged path names nothing; a caller
+# that handed it to a library shows its users the path they asked for.
+@pytest.mark.parametrize("front", ["sync", "async"])
+def test_a_staged_error_names_the_target(
+    tmp_path: pathlib.Path, front: str
+) -> None:
+    target = tmp_path / "z.bin"
     with pytest.raises(IsADirectoryError) as info:
+        if front == "sync":
+            with Path(target).staged() as tmp:
+                tmp.mkdir()
+                tmp.write_bytes(b"x")
+        else:
+            async def go() -> None:
+                async with AsyncPath(target).staged() as tmp:
+                    await tmp.mkdir()
+                    await tmp.write_bytes(b"x")
+
+            _run(go())
+    assert info.value.filename == str(target)
+    assert ".staging-" not in str(info.value)
+    assert _listing(tmp_path) == []
+
+
+def test_a_staged_error_maps_a_path_below_and_beside_the_entry(
+    tmp_path: pathlib.Path,
+) -> None:
+    target = Path(tmp_path / "b.zarr")
+    with pytest.raises(FileNotFoundError) as info:
         with target.staged() as tmp:
             tmp.mkdir()
-            tmp.write_bytes(b"x")
-    assert info.value.filename == str(tmp)
+            (tmp / "missing" / "chunk").write_bytes(b"x")
+    assert info.value.filename == str(target / "missing" / "chunk")
+
+    # A library's own temporary file beside the entry: beside the target.
+    with pytest.raises(OSError) as info:
+        with target.staged() as tmp:
+            temporary = tmp.parent / ".b.zarr.tmp"
+            temporary.write_bytes(b"x")
+            raise OSError(
+                errno.EXDEV, "Cross-device link", str(temporary), None,
+                "/elsewhere",
+            )
+    assert info.value.filename == str(tmp_path / ".b.zarr.tmp")
+    assert info.value.filename2 == "/elsewhere"
     assert _listing(tmp_path) == []
+
+
+def test_a_staged_error_is_kept_itself(tmp_path: pathlib.Path) -> None:
+    class Custom(OSError):
+        pass
+
+    target = Path(tmp_path / "x.bin")
+    with pytest.raises(Custom) as info:
+        with target.staged() as tmp:
+            error = Custom(errno.EIO, "boom", str(tmp))
+            error.detail = "kept"  # type: ignore[attr-defined]
+            raise error
+    assert info.value is error
+    assert info.value.filename == str(target)
+    assert info.value.detail == "kept"  # type: ignore[attr-defined]
+
+
+def test_inside_the_block_an_error_names_the_staged_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    # There the staged path exists, and it is the one the code wrote.
+    target = Path(tmp_path / "z.bin")
+    with target.staged() as tmp:
+        tmp.mkdir()
+        with pytest.raises(IsADirectoryError) as info:
+            tmp.write_bytes(b"x")
+        assert info.value.filename == str(tmp)
+        tmp.rmdir()
+    assert _listing(tmp_path) == []
+
+
+def test_a_staged_error_about_another_path_is_left_alone(
+    tmp_path: pathlib.Path,
+) -> None:
+    target = Path(tmp_path / "x.bin")
+    with pytest.raises(OSError) as info:
+        with target.staged():
+            raise OSError(errno.EIO, "boom", "/somewhere/else")
+    assert info.value.filename == "/somewhere/else"
+    with pytest.raises(ValueError):
+        with target.staged():
+            raise ValueError("not about a path")
+
+
+def test_a_staged_error_on_a_remote_target(memory: None) -> None:
+    target = Path("memory://bucket/b.zarr")
+    with pytest.raises(FileNotFoundError) as info:
+        with target.staged() as tmp:
+            tmp.mkdir()
+            (tmp / "missing" / "chunk").write_bytes(b"x")
+    assert info.value.filename == str(target / "missing" / "chunk")
+    assert not target.exists()
 
 
 def test_a_staging_directory_that_cannot_be_made_names_the_target(

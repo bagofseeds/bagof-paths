@@ -135,7 +135,9 @@ name would collide.
   (`AtomicStage`/`AsyncAtomicStage`, `atomic()`/`aatomic()`) and must act as
   the plain write wherever the stage would show: it refuses a directory
   (#45), a failure leaves nothing behind and raises the error itself (#46),
-  and the error names the target, not the staging directory (#47).
+  and the error names the target, not the staging directory (#47). An
+  `OSError` leaving a `staged()` block names the target too (#60), changed
+  in place (`_name_target`); inside the block it names the staged path.
   `AsyncPath.staged` is a plain method returning an `AsyncStage` (marked
   `_awaitable` for the parity tests): no I/O until it is entered or awaited.
 - **Local copies (`_local_copy.py`).** `local_copy()` (one mixin on `Path`

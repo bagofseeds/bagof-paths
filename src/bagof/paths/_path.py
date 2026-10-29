@@ -347,10 +347,23 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
           directory beside this path, never removed; `CommitError` says
           where both are.
 
-        An error raised while your code writes at the staged path names the
-        staged path, since that is the path it wrote. The `atomic=True`
-        writers name this path instead: their caller never sees the
-        staging area.
+        An error that leaves the `with` block names this path, not the
+        staged one, which is gone by then: a path below or beside the
+        staged path is named below or beside this one. It is the same
+        error, with its `filename` changed. Inside the block, before it
+        leaves, it still names the staged path your code wrote.
+
+        ```pycon
+        >>> import tempfile
+        >>> from bagof.paths import Path
+        >>> target = Path(tempfile.mkdtemp()) / "store.zarr"
+        >>> try:
+        ...     with target.staged() as tmp:
+        ...         (tmp / "missing" / "chunk").write_bytes(b"x")
+        ... except FileNotFoundError as error:
+        ...     error.filename == str(target / "missing" / "chunk")
+        True
+        ```
 
         The staging area is a hidden directory beside this path (beside the
         file a symbolic link names), so the move stays on one file system; a
