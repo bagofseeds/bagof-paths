@@ -668,6 +668,12 @@ class BaseWrapper:
             # does: a POSIX path never equals a Windows one, and the hash
             # below is the flavour's own.
             return ("", self.path, _local_flavour(self._wrapped))
+        if _is_relative(self._wrapped):
+            # A relative path (what `relative_to` gives) names no location
+            # in its store until it is joined onto one, so it is the bare
+            # relative path, as universal-pathlib compares it: equal to the
+            # same relative path from any store, never to an absolute one.
+            return ("", str(self._wrapped), pathlib.PurePosixPath)
         # Scheme aliases (s3/s3a, gs/gcs) are folded to their canonical name,
         # so two spellings of the same store compare and hash equal.
         return (store, self.path)
@@ -982,6 +988,21 @@ def _local_flavour(wrapped: tx.Any) -> tx.Type[pathlib.PurePath]:
     if os.name == "nt":  # pragma: no cover - exercised on Windows only
         return pathlib.PureWindowsPath
     return pathlib.PurePosixPath
+
+
+def _is_relative(wrapped: tx.Any) -> bool:
+    """Whether a remote driver says its path is relative.
+
+    Only an explicit `False` from its `is_absolute` counts: a driver without
+    the member, or one that cannot answer, names an absolute location.
+    """
+    is_absolute = getattr(wrapped, "is_absolute", None)
+    if not callable(is_absolute):
+        return False
+    try:
+        return is_absolute() is False
+    except Exception:
+        return False
 
 
 def _local_identity(name: str) -> tx.Tuple[tx.Any, ...]:

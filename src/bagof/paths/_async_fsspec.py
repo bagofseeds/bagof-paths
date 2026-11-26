@@ -309,7 +309,13 @@ class AsyncFSPath:
     """A path on an fsspec async filesystem, wrapped by `AsyncPath`."""
 
     __slots__ = (
-        "_scheme", "_path", "_options", "_pure", "_anchor", "_slash",
+        "_scheme",
+        "_path",
+        "_options",
+        "_pure",
+        "_anchor",
+        "_slash",
+        "_relative",
         "_snapshot",
     )
 
@@ -318,9 +324,23 @@ class AsyncFSPath:
         scheme: str,
         path: str,
         options: tx.Optional[tx.Mapping[str, tx.Any]] = None,
+        *,
+        relative: bool = False,
     ) -> None:
         self._scheme = scheme
         self._options = dict(options or {})
+        # A relative path (what `relative_to` returns) names no object on the
+        # store until it is joined onto one: it prints, joins and compares as
+        # a bare relative path, as universal-pathlib's does. A backend that
+        # strips `s3://b/k` to `b/k` has no leading slash to tell the two
+        # kinds apart, so the kind is carried here, not read off the path.
+        self._relative = relative
+        if relative:
+            self._anchor = ""
+            self._slash = False
+            self._pure = PurePosixPath(path)
+            self._path = str(self._pure)
+            return
         # The `scheme://authority` prefix of a backend whose filesystem path
         # is the whole URL (HTTP), else "". The lexical members run on the
         # remainder only, so `//` and the authority are never parsed as path
@@ -381,6 +401,8 @@ class AsyncFSPath:
         return self._options
 
     def __str__(self) -> str:
+        if self._relative:
+            return self._path
         if self._anchor:
             # The filesystem path is already the whole URL.
             return self._path
@@ -391,6 +413,10 @@ class AsyncFSPath:
         return f"AsyncFSPath({str(self)!r})"
 
     def _derive(self, pure: PurePosixPath) -> AsyncFSPath:
+        if self._relative and not pure.is_absolute():
+            return AsyncFSPath(
+                self._scheme, str(pure), self._options, relative=True
+            )
         if self._anchor:
             sep = "" if pure.is_absolute() else "/"
             path = self._anchor + sep + str(pure)
@@ -451,11 +477,12 @@ class AsyncFSPath:
         return parents
 
     def joinpath(self, *segments: tx.Any) -> AsyncFSPath:
-        # A URL segment, or a path of this driver, names a location of its
-        # own and restarts the join, as an absolute path does in pathlib.
+        # A URL segment, or an absolute path of this driver, names a location
+        # of its own and restarts the join, as an absolute path does in
+        # pathlib; a relative one is joined by its parts.
         result = self
         for segment in segments:
-            if isinstance(segment, AsyncFSPath):
+            if isinstance(segment, AsyncFSPath) and not segment._relative:
                 self._check_scheme(segment._scheme)
                 result = segment
                 continue
@@ -500,30 +527,34 @@ class AsyncFSPath:
         return self._pure.as_posix()
 
     def as_uri(self) -> str:
+        if self._relative:
+            raise ValueError("relative path can't be expressed as a URI")
         return str(self)
 
     def is_absolute(self) -> bool:
-        return self._pure.is_absolute()
+        return not self._relative
 
-    def _other_locus(self, other: tx.Any) -> tx.Tuple[str, PurePosixPath]:
-        """`other` as an (anchor, lexical path) pair to compare against.
+    def _other_locus(
+        self, other: tx.Any
+    ) -> tx.Tuple[str, bool, PurePosixPath]:
+        """`other` as an (anchor, relative, lexical path) triple.
 
-        A bare, scheme-less text is read under this path's own anchor.
+        A bare, scheme-less text is read under this path's own anchor, as a
+        path of this path's own kind.
         """
         if isinstance(other, AsyncFSPath):
-            return other._anchor, other._pure
+            return other._anchor, other._relative, other._pure
         text = path_text(other)
         if "://" in text:
             parsed = AsyncFSPath(self._scheme, _strip(self._scheme, text))
-            return parsed._anchor, parsed._pure
-        return self._anchor, PurePosixPath(text)
+            return parsed._anchor, False, parsed._pure
+        return self._anchor, self._relative, PurePosixPath(text)
 
-    def relative_to(
-        self, other: tx.Any, walk_up: bool = False
-    ) -> tx.Union[AsyncFSPath, PurePosixPath]:
-        anchor, base = self._other_locus(other)
-        if anchor != self._anchor:
-            # A different authority (another host) is never a prefix.
+    def relative_to(self, other: tx.Any, walk_up: bool = False) -> AsyncFSPath:
+        anchor, other_relative, base = self._other_locus(other)
+        if anchor != self._anchor or other_relative != self._relative:
+            # A different authority (another host) is never a prefix, nor is
+            # a relative path one of an absolute path, or the other way round.
             raise ValueError(
                 f"{str(self)!r} is not relative to {str(other)!r}"
             )
@@ -531,11 +562,12 @@ class AsyncFSPath:
             relative = self._pure.relative_to(base, walk_up=True)
         else:
             relative = self._pure.relative_to(base)
-        if self._anchor:
-            # A bare relative path, as universal-pathlib returns: it has no
-            # authority to carry.
-            return relative
-        return self._derive(relative)
+        # A relative path of this backend, as universal-pathlib returns: it
+        # has no scheme or authority in its string, but keeps its protocol
+        # and options for when it is joined back onto a location.
+        return AsyncFSPath(
+            self._scheme, str(relative), self._options, relative=True
+        )
 
     def is_relative_to(self, other: tx.Any) -> bool:
         try:
@@ -546,6 +578,17 @@ class AsyncFSPath:
 
     # -- filesystem access --------------------------------------------------
     async def _fs(self) -> tx.Any:
+        if self._relative:
+            # A relative key would reach whatever the backend reads it as
+            # (the root, for an in-memory store): refuse it, as a relative
+            # universal-pathlib path refuses I/O.
+            raise UnsupportedPathOperation(
+                "I/O on a relative path",
+                hint=(
+                    f"{self._path!r} names no object on the store; join it "
+                    "to an absolute path first"
+                ),
+            )
         return await _resolve_fs(self._scheme, self._options)
 
     # -- status -------------------------------------------------------------
@@ -809,7 +852,7 @@ class AsyncFSPath:
 
     def _as_fs_path(self, target: tx.Any) -> str:
         """A move/copy target as a filesystem path for this backend."""
-        if isinstance(target, AsyncFSPath):
+        if isinstance(target, AsyncFSPath) and not target._relative:
             self._check_scheme(target._scheme)
             return target._path
         text = path_text(target)
@@ -821,7 +864,7 @@ class AsyncFSPath:
 
     def _into(self, target_dir: tx.Any) -> AsyncFSPath:
         """This path's name placed inside `target_dir` (for *_into)."""
-        if isinstance(target_dir, AsyncFSPath):
+        if isinstance(target_dir, AsyncFSPath) and not target_dir._relative:
             self._check_scheme(target_dir._scheme)
             return target_dir._derive(target_dir._pure / self._pure.name)
         text = path_text(target_dir)
