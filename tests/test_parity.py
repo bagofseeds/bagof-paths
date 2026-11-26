@@ -60,3 +60,27 @@ def test_signatures_match_including_defaults_and_kinds() -> None:
         assert _shape(getattr(Path, name)) == _shape(
             getattr(AsyncPath, name)
         ), f"{name} signature differs"
+
+
+# -- pathinfo (#64) -----------------------------------------------------------
+# `pathinfo` is a property on both wrappers, so the rules above (which read
+# methods) do not see it. Its two objects are held to the same rule as the
+# wrappers themselves: every public method of the sync one has a coroutine
+# twin with the same signature, and the async one has nothing else.
+def test_pathinfo_is_a_property_on_both() -> None:
+    for cls in (Path, AsyncPath):
+        assert isinstance(inspect.getattr_static(cls, "pathinfo"), property)
+
+
+def test_pathinfo_methods_mirror_each_other() -> None:
+    from bagof.paths import AsyncPathInfo, PathInfo
+
+    sync = _own_io_functions(PathInfo)
+    assert sync == _own_io_functions(AsyncPathInfo)
+    assert sync >= {"exists", "is_dir", "is_file", "is_symlink"}
+    for name in sync:
+        assert _is_async(getattr(AsyncPathInfo, name)), name
+        assert not _is_async(getattr(PathInfo, name)), name
+        assert _shape(getattr(PathInfo, name)) == _shape(
+            getattr(AsyncPathInfo, name)
+        ), f"{name} signature differs"

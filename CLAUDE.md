@@ -45,8 +45,14 @@ src/bagof/paths/
                  #   the location + driver-specific accessor properties
   _fallbacks.py  # the synthesis functions named by Member.fallback
   _match.py      # vendored CPython 3.13 glob.translate (PSF-licensed) for
-                 #   match/full_match, computed lexically on the canonical path
-  _drivers.py    # driver adapters (rmdir/copy/move/walk divergence) +
+                 #   match/full_match, computed lexically on the canonical path,
+                 #   and for the shared glob
+  _glob.py       # the shared glob/rglob: CPython 3.14's selectors (PSF) over
+                 #   any driver's listing, sans-IO for Path and AsyncPath
+  _pathinfo.py   # PathInfo/AsyncPathInfo and the Facts record behind
+                 #   `pathinfo`: 3.14's two views, from a listing or asked once
+  _drivers.py    # driver adapters (rmdir/copy/move/walk divergence, listings,
+                 #   glob_tree, pathinfo reads) +
                  #   register_driver
   _protocols.py  # ProtocolTraits, register_protocol, canonical_scheme
   _detect.py     # is_async_driver: whether a driver's members are coroutines
@@ -67,6 +73,8 @@ src/bagof/paths/
 tests/
   test_import.py, test_identity.py, test_derivation.py
   test_path_sync.py, test_path_io.py, test_fallbacks.py, test_match.py
+  test_pathinfo.py            # pathinfo vs the measured 3.14 info table
+  test_glob.py                # glob vs the measured 3.14 tables, per driver
   test_internals.py, test_drivers.py, test_async.py
   test_parity_gap.py          # the pathlib/UPath/cloud surface parity
   test_driver_selection.py    # URL construction + register_protocol
@@ -149,6 +157,23 @@ name would collide.
   them: each goes with its last holder; the stage removes leftovers on close.
   A copy taken by hand is never removed by GC (a library may still read it);
   only `cleanup()` or its stage closing removes it.
+- **`pathinfo` (`_pathinfo.py`, design §5, #64)** answers as 3.14's
+  `Path.info` on every driver: an `LSTAT` view (the path itself; filled by
+  a listing -- `iterdir`, `glob`, `walk` -- at no cost) and a `STAT` view
+  (what it leads to; read once, when first needed). A listed non-link is
+  typed by its listing; `exists()`, `size()` and `mtime()` come from
+  `STAT`, read together; a listed entry keeps no failed `STAT` read, as
+  `os.DirEntry` keeps no failed stat. The adapter reads a view
+  (`query_facts`); `tests/test_pathinfo.py` holds every driver to the
+  measured 3.14 table.
+- **One shared `glob` (`_glob.py`, design §5).** `glob`/`rglob` never
+  delegate while the driver has `iterdir`: CPython 3.14's selectors run
+  over the wrapper's own `iterdir()` children (so matches carry
+  `pathinfo`), yielding I/O requests that `iterate`/`aiterate` answer. A
+  `**` first asks the adapter's `glob_tree` for one recursive listing
+  (UPath `fs.find`, cloudpathlib `walk()`, `AsyncFSPath._find`; never a
+  local or symlinked store). Results are 3.14's on every driver and
+  version; the reconciled differences are in the §5 table.
 - **`_drivers.py` absorbs the operations backends genuinely disagree on** —
   `rmdir` recursion, native `copy`/`move`, `walk` — behind adapters selected
   by driver type. A `GenericAdapter` duck-types any driver; named subclasses

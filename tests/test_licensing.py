@@ -1,9 +1,11 @@
-"""The PSF license has to reach the people who install the package.
+"""The PSF and MIT notices have to reach the people who install the package.
 
-Parts of _match.py are derived from CPython's glob/fnmatch, so the PSF
-license and the notice of changes must ship *with the distribution*, not
-merely sit in the repository. Getting that wrong is silent: the build
-succeeds and the file is simply absent.
+Parts of _match.py, _glob.py and _base.py are derived from CPython, so the
+PSF license and the notice of changes must ship *with the distribution*,
+not merely sit in the repository. Two small parts are derived from
+universal-pathlib, whose MIT license asks for its copyright and permission
+notice in every copy; NOTICE.md carries them. Getting that wrong is silent:
+the build succeeds and the text is simply absent.
 """
 
 import re
@@ -59,3 +61,36 @@ def test_the_notice_summarises_the_changes() -> None:
     text = (ROOT / "NOTICE.md").read_text()
     assert "Summary of changes" in text
     assert "glob" in text
+
+
+def test_the_notice_names_each_psf_derived_module() -> None:
+    text = (ROOT / "NOTICE.md").read_text()
+    for module in ("_match.py", "_glob.py", "_base.py"):
+        assert f"### `src/bagof/paths/{module}`" in text, module
+        assert f"### `{module}`" in text, module  # its summary of changes
+
+
+def test_the_notice_carries_the_mit_notice_of_universal_pathlib() -> None:
+    # MIT: "The above copyright notice and this permission notice shall be
+    # included in all copies or substantial portions of the Software."
+    text = (ROOT / "NOTICE.md").read_text()
+    assert "## universal-pathlib" in text
+    assert "Copyright (c) 2022, Andrew Fulton" in text
+    assert "Permission is hereby granted, free of charge" in text
+    assert "The above copyright notice and this permission notice" in text
+    assert 'THE SOFTWARE IS PROVIDED "AS IS"' in text
+
+
+@pytest.mark.parametrize(
+    "module, marker",
+    [
+        ("_drivers.py", "universal-pathlib's UPath.iterdir (MIT; NOTICE.md)"),
+        ("_pathinfo.py", "universal-pathlib's own stat (MIT; NOTICE.md)"),
+    ],
+)
+def test_the_mit_derived_code_points_at_the_notice(
+    module: str, marker: str
+) -> None:
+    # The code NOTICE.md names says so where it is, so the two stay paired.
+    source = ROOT / "src" / "bagof" / "paths" / module
+    assert marker in " ".join(source.read_text().split())

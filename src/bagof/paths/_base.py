@@ -22,6 +22,7 @@ adapter layer refines them for the known drivers that diverge.
 from __future__ import annotations
 
 import copy
+import copyreg
 import os
 import pathlib
 from pathlib import Path as LocalPath
@@ -40,6 +41,7 @@ from ._constants import (
 )
 from ._detect import is_async_driver
 from ._errors import NoLocalPathError, UnsupportedPathOperation
+from ._pathinfo import Facts, InfoView
 from ._protocols import (
     canonical_scheme,
     chain_links,
@@ -57,7 +59,11 @@ _MISSING = object()
 class BaseWrapper:
     """Wrap a path-like object and expose it through one uniform surface."""
 
-    __slots__ = ("_wrapped",)
+    # `_snapshot` holds what is known about this path for `pathinfo`: the
+    # record a directory listing gave (see `_pathinfo`), or the info object
+    # once `pathinfo` has been read. It is never carried onto a derived
+    # path, and unset on a path built by the constructor.
+    __slots__ = ("_wrapped", "_snapshot")
 
     # Which front-end family this wrapper belongs to: whether its I/O
     # methods are synchronous or coroutines. It does not enter identity --
@@ -198,8 +204,9 @@ class BaseWrapper:
             return self._supports_adapter_member(name)
         if name in COMPUTED_MEMBERS or name in STAGED_MEMBERS:
             # Computed here, so available wherever the wrapper defines it
-            # (local_copy and staged are on Path/AsyncPath, not PurePath).
-            return hasattr(self, name)
+            # (local_copy, staged and pathinfo are on Path/AsyncPath, not
+            # PurePath). Read from the class, so a property is not run.
+            return hasattr(type(self), name)
         if name in ACCESSOR_MEMBERS:
             # Check the driver *class*, not the instance: these accessors are
             # properties, and some (universal-pathlib's `fs`/`info`) build the
@@ -245,7 +252,80 @@ class BaseWrapper:
         """
         new = copy.copy(self)
         new._wrapped = wrapped
+        # What is known about this path describes it alone, never another.
+        new._snapshot = None
         return new
+
+    def _listed(self, wrapped: tx.Any, facts: tx.Optional[Facts]) -> tx.Self:
+        """A child built from a directory listing, holding what the listing
+        said about it (`None`: it said nothing)."""
+        new = self.with_wrapped(wrapped)
+        new._snapshot = facts
+        return new
+
+    def _windows_patterns(self) -> bool:
+        """Whether a glob pattern takes Windows separators: a local path of
+        the Windows flavour."""
+        if not self.is_local():
+            return False
+        wrapped = self._wrapped
+        if isinstance(wrapped, pathlib.PurePath):
+            return isinstance(wrapped, pathlib.PureWindowsPath)
+        return os.name == "nt"
+
+    def _facts(self) -> tx.Optional[Facts]:
+        """The record of what is known about this path, if there is one."""
+        slot = getattr(self, "_snapshot", None)
+        if isinstance(slot, InfoView):
+            return slot._facts
+        return slot if isinstance(slot, Facts) else None
+
+    def _listing_facts(self) -> tx.Optional[Facts]:
+        """The record a directory listing gave this path, if it gave one."""
+        facts = self._facts()
+        return facts if facts is not None and facts.listed else None
+
+    def __getstate__(self) -> tx.Any:
+        # What is known about the path (`pathinfo`) is not part of it: a
+        # copy or an unpickled path asks afresh, and a listing's own entry
+        # (an os.DirEntry) cannot be pickled. Everything else is kept.
+        slots = {}
+        for name in _state_slots(type(self)):
+            value = getattr(self, name, _MISSING)
+            if value is not _MISSING:
+                slots[name] = value
+        return (getattr(self, "__dict__", None) or None, slots)
+
+    def __copy__(self) -> tx.Self:
+        # `copy.copy` (and so every derived path, through `with_wrapped`):
+        # the same shallow copy `__getstate__` describes, made directly.
+        cls = type(self)
+        new = cls.__new__(cls)
+        for name in _state_slots(cls):
+            value = getattr(self, name, _MISSING)
+            if value is not _MISSING:
+                setattr(new, name, value)
+        state = getattr(self, "__dict__", None)
+        if state:
+            new.__dict__.update(state)
+        return new
+
+    def _info_view(self, kind: tx.Type[tx.Any]) -> tx.Any:
+        """This path's `pathinfo` object, made on first use and then kept.
+
+        It reads a copy of this path that holds no record itself, so the
+        path and its info do not refer to each other.
+        """
+        slot = getattr(self, "_snapshot", None)
+        if isinstance(slot, kind):
+            return slot
+        facts = self._facts()
+        view = kind(
+            self.with_wrapped(self._wrapped),
+            Facts() if facts is None else facts,
+        )
+        self._snapshot = view
+        return view
 
     def _coerce_target(self, target: tx.Any) -> tx.Any:
         """A copy/move/rename target as a bare driver path of this kind.
@@ -757,6 +837,20 @@ class BaseWrapper:
     def __rtruediv__(self, other: tx.Any) -> tx.Self:
         other = path_arg(other)
         return self.with_wrapped(other / self._wrapped)
+
+
+_STATE_SLOTS: tx.Dict[type, tx.Tuple[str, ...]] = {}
+
+
+def _state_slots(cls: type) -> tx.Tuple[str, ...]:
+    """The slots that hold a wrapper's state: all but the `pathinfo` one."""
+    names = _STATE_SLOTS.get(cls)
+    if names is None:
+        names = _STATE_SLOTS[cls] = tuple(
+            name for name in copyreg._slotnames(cls)  # type: ignore
+            if name != "_snapshot"
+        )
+    return names
 
 
 def _build_from_string(

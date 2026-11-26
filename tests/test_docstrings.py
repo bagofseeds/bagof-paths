@@ -24,6 +24,7 @@ import bagof.paths as paths
 #: Modules whose public docstrings carry runnable examples.
 SOURCES = [
     "_base.py", "_path.py", "_async_path.py", "_pure.py", "_purepath.py",
+    "_pathinfo.py",
 ]
 
 #: Hand-written pages, relative to the repository root.

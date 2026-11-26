@@ -139,13 +139,17 @@ IO_MEMBERS = (
     ),
     # directory iteration
     Member("iterdir", IO, result=PATH_ITER),
+    # glob/rglob are the shared glob (_glob.py) over iterdir, whatever the
+    # driver's own; a driver that cannot list keeps its glob.
     Member(
         "glob", IO, result=PATH_ITER,
         normalize=(("case_sensitive", None), ("recurse_symlinks", False)),
+        fallback="glob", needs=("iterdir",),
     ),
     Member(
         "rglob", IO, result=PATH_ITER,
         normalize=(("case_sensitive", None), ("recurse_symlinks", False)),
+        fallback="rglob", needs=("iterdir",),
     ),
     # creation (return None, like pathlib -- no fluent self)
     Member(
