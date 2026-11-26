@@ -934,7 +934,7 @@ def test_iterdir_snapshot_stays_on_the_listed_child() -> None:
     async def go() -> object:
         await AsyncPath("memasync://b/snap/sub/f.txt").write_bytes(b"x")
         (child,) = [c async for c in AsyncPath("memasync://b/snap").iterdir()]
-        listed = child.wrapped._snapshot.get("dir")
+        listed = child.wrapped._snapshot.get("lstat", "dir")
         derived = [
             child / "f.txt", child.parent, child.with_name("other"),
             child.joinpath("x"),
@@ -984,7 +984,7 @@ async def _ask(path: AsyncPath) -> tuple:
     )
 
 
-def test_pathinfo_on_listed_children_costs_no_call(
+def test_pathinfo_on_listed_children_types_cost_no_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Counted from the start: the async wrapper binds the in-memory
@@ -1000,21 +1000,40 @@ def test_pathinfo_on_listed_children_costs_no_call(
             "walk": [p async for p, _, _ in base.walk()][1:],
         }
         counts.update(dict.fromkeys(counts, 0))
-        answers = {}
+        types, status = {}, {}
         for op, paths in listed.items():
-            answers[op] = sorted([(p.name, await _ask(p)) for p in paths])
-        return answers, {k: v for k, v in counts.items() if v}
+            types[op] = sorted([
+                (p.name, await p.pathinfo.is_dir(),
+                 await p.pathinfo.is_file(), await p.pathinfo.is_symlink())
+                for p in paths
+            ])
+        type_calls = {k: v for k, v in counts.items() if v}
+        for op, paths in listed.items():
+            status[op] = sorted([(p.name, await _ask(p)) for p in paths])
+            await _ask(paths[0])  # kept: asked again, no call
+        calls = {k: v for k, v in counts.items() if v}
+        return types, type_calls, status, calls
 
-    answers, calls = _run(go())
+    types, type_calls, status, calls = _run(go())
+    assert types == {
+        "iterdir": [
+            ("scan.nii", False, True, False), ("sub", True, False, False),
+        ],
+        "glob": [("scan.nii", False, True, False)],
+        "rglob": [("inner.txt", False, True, False)],
+        "walk": [("sub", True, False, False)],
+    }
+    assert type_calls == {}  # what the listing said
     file4 = (False, True, True, False, 4, True)
     folder = (True, False, True, False, None, False)
-    assert answers == {
+    assert status == {
         "iterdir": [("scan.nii", file4), ("sub", folder)],
         "glob": [("scan.nii", file4)],
         "rglob": [("inner.txt", (False, True, True, False, 2, True))],
         "walk": [("sub", folder)],
     }
-    assert calls == {}
+    # exists(), size() and mtime(): one fs._info per path, when first asked.
+    assert calls == {"info": 5}
 
 
 def test_pathinfo_on_an_unlisted_path_asks_once(
@@ -1036,7 +1055,10 @@ def test_pathinfo_on_an_unlisted_path_asks_once(
 
     first, calls, kept, live, missing = _run(go())
     assert first == (False, True, True, False, 4, True)
-    assert calls == {"info": 1}  # one fs._info answers every question
+    # One fs._info for what the path leads to (is_dir, exists, size, ...)
+    # and one for the path itself (is_symlink), as pathlib 3.14 reads its
+    # stat and its lstat apart; each kept from then on.
+    assert calls == {"info": 2}
     assert (kept, live, missing) == (True, False, False)
 
 

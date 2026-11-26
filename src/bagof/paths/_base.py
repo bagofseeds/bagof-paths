@@ -263,6 +263,16 @@ class BaseWrapper:
         new._snapshot = facts
         return new
 
+    def _windows_patterns(self) -> bool:
+        """Whether a glob pattern takes Windows separators: a local path of
+        the Windows flavour."""
+        if not self.is_local():
+            return False
+        wrapped = self._wrapped
+        if isinstance(wrapped, pathlib.PurePath):
+            return isinstance(wrapped, pathlib.PureWindowsPath)
+        return os.name == "nt"
+
     def _facts(self) -> tx.Optional[Facts]:
         """The record of what is known about this path, if there is one."""
         slot = getattr(self, "_snapshot", None)

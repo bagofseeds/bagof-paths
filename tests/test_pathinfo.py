@@ -1,9 +1,10 @@
-"""`pathinfo`: what a path is, from its listing or asked once (#64).
+"""`pathinfo`: what a path is, answered as pathlib 3.14's `info` (#64).
 
-A listed child (iterdir, glob/rglob, walk) answers from what the listing
-said, with no further call to the store; any other path asks the store the
-first time and keeps the answer. The answers are point-in-time, never ride
-onto a derived path, and are the same object on every driver. The stdlib
+The answers come in two views, as 3.14 keeps them: the path itself (its
+type, as a listing saw it, or one `lstat`) and what it leads to (one
+`stat`, read the first time `exists()`, `size()` or `mtime()` -- or the
+type of anything not listed -- is asked). Each is kept once obtained. The
+3.14 table below is measured, and every driver is held to it. The stdlib
 tests run on every interpreter, the 3.8 core-only leg included; the backend
 tests need universal-pathlib or cloudpathlib.
 """
@@ -12,6 +13,7 @@ import asyncio
 import os
 import pathlib
 import pickle
+import shutil
 import sys
 
 import pytest
@@ -24,17 +26,231 @@ from bagof.paths import (
     PurePath,
 )
 
-_ANSWERS = ("is_dir", "is_file", "is_symlink", "exists")
+# What pathlib 3.14's `Path.info` answers (measured, CPython 3.14.6 on
+# Linux) for a path `t` that is listed (`iterdir`) or not (`root / "t"`),
+# after it is changed. Each string answers, in order: exists(),
+# is_dir(), is_file(), exists(follow_symlinks=False),
+# is_dir(follow_symlinks=False), is_file(follow_symlinks=False),
+# is_symlink(); the three strings are for nothing asked before the change,
+# is_file() asked before it, and is_symlink() asked before it.
+_ORDER = (
+    ("exists", True), ("is_dir", True), ("is_file", True),
+    ("exists", False), ("is_dir", False), ("is_file", False),
+    ("is_symlink", None),
+)
+_PRE = ("", "is_file", "is_symlink")
+_PYTHON_314 = {
+    ("listed", "file", "none"): ("1011010", "1011010", "1011010"),
+    ("listed", "file", "delete"): ("0011010", "0011010", "0011010"),
+    ("listed", "file", "replace"): ("1011010", "1011010", "1011010"),
+    ("listed", "file", "type-change"): ("1011010", "1011010", "1011010"),
+    ("listed", "dir", "none"): ("1101100", "1101100", "1101100"),
+    ("listed", "dir", "delete"): ("0101100", "0101100", "0101100"),
+    ("listed", "dir", "replace"): ("1101100", "1101100", "1101100"),
+    ("listed", "dir", "type-change"): ("1101100", "1101100", "1101100"),
+    ("listed", "link-file", "none"): ("1011001", "1011001", "1011001"),
+    ("listed", "link-file", "delete"): ("0001001", "1011001", "0001001"),
+    ("listed", "link-file", "replace"): ("1011001", "1011001", "1011001"),
+    ("listed", "link-file", "type-change"): (
+        "1101001", "1011001", "1101001"
+    ),
+    ("listed", "link-file", "delete-target"): (
+        "0001001", "1011001", "0001001"
+    ),
+    ("listed", "link-dir", "none"): ("1101001", "1101001", "1101001"),
+    ("listed", "link-dir", "delete"): ("0001001", "1101001", "0001001"),
+    ("listed", "link-dir", "replace"): ("1011001", "1101001", "1011001"),
+    ("listed", "link-dir", "type-change"): ("1101001", "1101001", "1101001"),
+    ("listed", "link-dir", "delete-target"): (
+        "0001001", "1101001", "0001001"
+    ),
+    ("listed", "dangling", "none"): ("0001001", "0001001", "0001001"),
+    ("listed", "dangling", "delete"): ("0001001", "0001001", "0001001"),
+    ("listed", "dangling", "replace"): ("1011001", "1011001", "1011001"),
+    ("listed", "dangling", "type-change"): ("1101001", "1101001", "1101001"),
+    ("unlisted", "file", "none"): ("1011010", "1011010", "1011010"),
+    ("unlisted", "file", "delete"): ("0000000", "1010000", "0001010"),
+    ("unlisted", "file", "replace"): ("1011010", "1011010", "1011010"),
+    ("unlisted", "file", "type-change"): ("1101100", "1011100", "1101010"),
+    ("unlisted", "dir", "none"): ("1101100", "1101100", "1101100"),
+    ("unlisted", "dir", "delete"): ("0000000", "1100000", "0001100"),
+    ("unlisted", "dir", "replace"): ("1101100", "1101100", "1101100"),
+    ("unlisted", "dir", "type-change"): ("1011010", "1101010", "1011100"),
+    ("unlisted", "link-file", "none"): ("1011001", "1011001", "1011001"),
+    ("unlisted", "link-file", "delete"): ("0000000", "1010000", "0001001"),
+    ("unlisted", "link-file", "replace"): ("1011001", "1011001", "1011001"),
+    ("unlisted", "link-file", "type-change"): (
+        "1101100", "1011100", "1101001"
+    ),
+    ("unlisted", "link-file", "delete-target"): (
+        "0001001", "1011001", "0001001"
+    ),
+    ("unlisted", "link-dir", "none"): ("1101001", "1101001", "1101001"),
+    ("unlisted", "link-dir", "delete"): ("0000000", "1100000", "0001001"),
+    ("unlisted", "link-dir", "replace"): ("1011001", "1101001", "1011001"),
+    ("unlisted", "link-dir", "type-change"): (
+        "1101100", "1101100", "1101001"
+    ),
+    ("unlisted", "link-dir", "delete-target"): (
+        "0001001", "1101001", "0001001"
+    ),
+    ("unlisted", "dangling", "none"): ("0001001", "0001001", "0001001"),
+    ("unlisted", "dangling", "delete"): ("0000000", "0000000", "0001001"),
+    ("unlisted", "dangling", "replace"): ("1011001", "0001001", "1011001"),
+    ("unlisted", "dangling", "type-change"): (
+        "1101100", "0001100", "1101001"
+    ),
+}
+_SCENARIOS = [
+    (listed, kind, how, pre)
+    for (listed, kind, how) in _PYTHON_314
+    for pre in _PRE
+]
+_LINK_FREE = [s for s in _SCENARIOS if s[1] in ("file", "dir")]
+# A key cannot become a prefix in place on cloudpathlib's local test store
+# (the emptied directory stays behind), so a type change is not tried there.
+_CLOUD = [s for s in _LINK_FREE if s[2] != "type-change"]
+_HAS_LINKS = hasattr(os, "symlink") and os.name != "nt"
 
 
-def _answers(info: PathInfo) -> dict:
-    return {
-        "dir": info.is_dir(), "file": info.is_file(),
-        "link": info.is_symlink(), "exists": info.exists(),
-        "size": info.size(),
-    }
+def _expected(listed: str, kind: str, how: str, pre: str) -> str:
+    return _PYTHON_314[listed, kind, how][_PRE.index(pre)]
 
 
+def _bits(info: object) -> str:
+    out = ""
+    for name, follow in _ORDER:
+        method = getattr(info, name)
+        out += str(int(method() if follow is None else method(
+            follow_symlinks=follow
+        )))
+    return out
+
+
+def _pre(info: object, pre: str) -> None:
+    if pre:
+        getattr(info, pre)()
+
+
+# -- a local tree, changed as the table says ----------------------------------
+def _build(root: pathlib.Path, kind: str) -> None:
+    target = root / "t"
+    if kind == "file":
+        target.write_bytes(b"1234")
+    elif kind == "dir":
+        target.mkdir()
+    elif kind == "link-file":
+        (root / "target").write_bytes(b"1234")
+        target.symlink_to(root / "target")
+    elif kind == "link-dir":
+        (root / "target").mkdir()
+        target.symlink_to(root / "target", True)
+    else:
+        target.symlink_to(root / "gone")
+
+
+def _change(root: pathlib.Path, how: str) -> None:
+    target = root / "t"
+    if how == "delete":
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        else:
+            shutil.rmtree(target)
+    elif how == "delete-target":
+        other = root / "target"
+        if other.is_dir():
+            shutil.rmtree(other)
+        else:
+            other.unlink()
+    elif how == "replace":
+        if target.is_symlink():
+            target.unlink()
+            (root / "other").write_bytes(b"xx")
+            target.symlink_to(root / "other")
+        elif target.is_file():
+            target.unlink()
+            target.write_bytes(b"xx")
+        else:
+            shutil.rmtree(target)
+            target.mkdir()
+    elif how == "type-change":
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+            target.mkdir()
+        else:
+            shutil.rmtree(target)
+            target.write_bytes(b"xx")
+
+
+def _skip_links(kind: str) -> None:
+    if kind not in ("file", "dir") and not _HAS_LINKS:
+        pytest.skip("no symbolic links here")
+
+
+@pytest.mark.parametrize("listed, kind, how, pre", _SCENARIOS)
+def test_answers_as_pathlib_314_does(
+    tmp_path: pathlib.Path, listed: str, kind: str, how: str, pre: str,
+) -> None:
+    _skip_links(kind)
+    _build(tmp_path, kind)
+    if listed == "listed":
+        (path,) = [c for c in Path(tmp_path).iterdir() if c.name == "t"]
+    else:
+        path = Path(tmp_path) / "t"
+    _pre(path.pathinfo, pre)
+    _change(tmp_path, how)
+    assert _bits(path.pathinfo) == _expected(listed, kind, how, pre)
+
+
+@pytest.mark.skipif(sys.version_info < (3, 14), reason="pathlib 3.14 info")
+@pytest.mark.parametrize("listed, kind, how, pre", _SCENARIOS)
+def test_the_table_is_pathlib_314s_own(
+    tmp_path: pathlib.Path, listed: str, kind: str, how: str, pre: str,
+) -> None:
+    _skip_links(kind)
+    _build(tmp_path, kind)
+    if listed == "listed":
+        (path,) = [c for c in tmp_path.iterdir() if c.name == "t"]
+    else:
+        path = tmp_path / "t"
+    _pre(path.info, pre)
+    _change(tmp_path, how)
+    assert _bits(path.info) == _expected(listed, kind, how, pre)
+
+
+class _Awaited:
+    """An AsyncPathInfo read as a PathInfo, one event loop per call."""
+
+    def __init__(self, info: AsyncPathInfo) -> None:
+        self._info = info
+
+    def __getattr__(self, name: str) -> object:
+        method = getattr(self._info, name)
+        return lambda **kw: asyncio.run(method(**kw))
+
+
+@pytest.mark.parametrize("listed, kind, how, pre", _SCENARIOS)
+def test_async_answers_as_pathlib_314_does(
+    tmp_path: pathlib.Path, listed: str, kind: str, how: str, pre: str,
+) -> None:
+    _skip_links(kind)
+    _build(tmp_path, kind)
+
+    async def child() -> AsyncPath:
+        return [c async for c in AsyncPath(tmp_path).iterdir()
+                if c.name == "t"][0]
+
+    if listed == "listed":
+        path = asyncio.run(child())
+    else:
+        path = AsyncPath(tmp_path) / "t"
+    info = _Awaited(path.pathinfo)
+    _pre(info, pre)
+    _change(tmp_path, how)
+    assert _bits(info) == _expected(listed, kind, how, pre)
+
+
+# -- the public surface -------------------------------------------------------
 def _tree(root: pathlib.Path) -> None:
     (root / "sub").mkdir()
     (root / "sub" / "inner.txt").write_bytes(b"in")
@@ -58,7 +274,6 @@ def _count_os_stats(monkeypatch: pytest.MonkeyPatch) -> list:
     return calls
 
 
-# -- the public surface -------------------------------------------------------
 def test_pathinfo_is_kept_on_the_path(tmp_path: pathlib.Path) -> None:
     p = Path(tmp_path)
     assert isinstance(p.pathinfo, PathInfo)
@@ -82,148 +297,71 @@ def test_supports_pathinfo_without_reading_it(
     assert not hasattr(PurePath(str(tmp_path)), "pathinfo")
 
 
-# -- stdlib: from the listing -------------------------------------------------
-def test_listed_children_answer_from_the_listing(
+# -- stdlib: what costs what --------------------------------------------------
+def test_listed_types_cost_nothing_and_status_one_stat(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _tree(tmp_path)
+    mtime = (tmp_path / "scan.nii").stat().st_mtime
     children = {c.name: c for c in Path(tmp_path).iterdir()}
     calls = _count_os_stats(monkeypatch)
     for child in children.values():
-        for name in _ANSWERS:
-            getattr(child.pathinfo, name)()
-        child.pathinfo.exists(follow_symlinks=False)
-        child.pathinfo.is_dir(follow_symlinks=False)
-    assert calls == []  # the types came from os.scandir's entries
-    assert children["sub"].pathinfo.is_dir()
-    assert not children["sub"].pathinfo.is_file()
-    assert children["scan.nii"].pathinfo.is_file()
-    assert children["scan.nii"].pathinfo.size() == 4
+        info = child.pathinfo
+        info.is_dir(), info.is_file(), info.is_symlink()
+        info.exists(follow_symlinks=False)
+        info.is_dir(follow_symlinks=False)
+    assert calls == []  # the types came from the listing
+    scan = children["scan.nii"].pathinfo
+    assert (scan.is_file(), scan.size()) == (True, 4)
+    assert scan.exists() and scan.mtime() == pytest.approx(mtime)
     assert children["sub"].pathinfo.size() is None
-    mtime = children["scan.nii"].pathinfo.mtime()
-    assert mtime == pytest.approx((tmp_path / "scan.nii").stat().st_mtime)
+    # exists(), size() and mtime(): one os.stat per path, when first asked.
+    assert calls == ["stat", "stat"]
 
 
-def test_iterdir_children_are_the_same_paths(
-    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _tree(tmp_path)
-    ours = sorted(str(c) for c in Path(tmp_path).iterdir())
-    assert ours == sorted(str(c) for c in tmp_path.iterdir())
-    monkeypatch.chdir(tmp_path)
-    assert sorted(str(c) for c in Path(".").iterdir()) == sorted(
-        str(c) for c in pathlib.Path(".").iterdir()
-    )
-
-
-def test_iterdir_errors_as_pathlib_does(tmp_path: pathlib.Path) -> None:
-    missing = tmp_path / "nope"
-    try:
-        expected = list(missing.iterdir())
-    except OSError as error:
-        expected = type(error)
-    with pytest.raises(expected):
-        list(Path(missing).iterdir())
-    if sys.version_info >= (3, 13):
-        # pathlib 3.13 reads the directory when iterdir() is called.
-        with pytest.raises(FileNotFoundError):
-            Path(missing).iterdir()
-    else:
-        Path(missing).iterdir()  # earlier pathlib, when iterated
-
-
-def test_info_is_left_as_the_drivers_own(tmp_path: pathlib.Path) -> None:
-    _tree(tmp_path)
-    (child, *_rest) = Path(tmp_path).iterdir()
-    if sys.version_info >= (3, 14):
-        # pathlib's own listing entry, as pathlib.Path.iterdir() gives it.
-        assert type(child.info) is type(next(tmp_path.iterdir()).info)
-    else:
-        with pytest.raises(NotImplementedError):
-            child.info  # noqa: B018 - no info before 3.14, as before
-
-
-def test_listed_snapshot_survives_a_delete(tmp_path: pathlib.Path) -> None:
-    _tree(tmp_path)
-    children = {c.name: c for c in Path(tmp_path).iterdir()}
-    scan, sub = children["scan.nii"], children["sub"]
-    (tmp_path / "scan.nii").unlink()
-    (tmp_path / "sub" / "inner.txt").unlink()
-    (tmp_path / "sub").rmdir()
-    # What the listing said ...
-    assert scan.pathinfo.is_file() and scan.pathinfo.exists()
-    assert sub.pathinfo.is_dir() and sub.pathinfo.exists()
-    # ... while the path itself asks the file system.
-    assert not scan.exists() and not scan.is_file()
-    assert not sub.exists() and not sub.is_dir()
-
-
-def test_a_later_query_never_overrides_the_listing(
-    tmp_path: pathlib.Path,
-) -> None:
-    _tree(tmp_path)
-    scan = next(c for c in Path(tmp_path).iterdir() if c.name == "scan.nii")
-    (tmp_path / "scan.nii").unlink()
-    # The size was not asked before the delete: it is read now, and the file
-    # is gone. What the listing said about its type still stands.
-    assert scan.pathinfo.size() is None
-    assert scan.pathinfo.is_file() and scan.pathinfo.exists()
-
-
-def test_unlisted_path_asks_once_and_keeps_it(
+def test_unlisted_path_reads_each_view_once(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _tree(tmp_path)
     scan = Path(tmp_path) / "scan.nii"
     calls = _count_os_stats(monkeypatch)
-    assert _answers(scan.pathinfo) == {
-        "dir": False, "file": True, "link": False, "exists": True, "size": 4,
-    }
-    scan.pathinfo.mtime()
-    assert calls == ["lstat"]  # one lstat answers everything
+    info = scan.pathinfo
+    assert (info.is_file(), info.exists(), info.size()) == (True, True, 4)
+    assert info.mtime() is not None and not info.is_dir()
+    assert calls == ["stat"]  # what the path leads to
+    assert not info.is_symlink() and info.exists(follow_symlinks=False)
+    assert calls == ["stat", "lstat"]  # the path itself
     (tmp_path / "scan.nii").unlink()
-    # As pathlib 3.14's info: the answer is the one obtained.
-    assert scan.pathinfo.is_file() and scan.pathinfo.exists()
-    assert not scan.exists()
+    assert info.is_file() and info.exists() and info.size() == 4  # kept
+    assert not scan.exists()  # the live answer
+
+
+def test_listed_status_is_read_when_first_asked(
+    tmp_path: pathlib.Path,
+) -> None:
+    # 3.14's DirEntryInfo: the type is the listing's, exists() is not.
+    _tree(tmp_path)
+    scan = next(c for c in Path(tmp_path).iterdir() if c.name == "scan.nii")
+    (tmp_path / "scan.nii").unlink()
+    assert scan.pathinfo.is_file()
+    assert not scan.pathinfo.exists()
+    assert scan.pathinfo.size() is None and scan.pathinfo.mtime() is None
 
 
 def test_missing_path(tmp_path: pathlib.Path) -> None:
     info = (Path(tmp_path) / "nope").pathinfo
-    assert _answers(info) == {
-        "dir": False, "file": False, "link": False, "exists": False,
-        "size": None,
-    }
-    assert info.mtime() is None
+    assert _bits(info) == "0000000"
+    assert info.size() is None and info.mtime() is None
     # A name too long is not there either: the info never raises.
     assert Path(tmp_path / ("a" * 300)).pathinfo.exists() is False
 
 
-@pytest.mark.skipif(not hasattr(os, "symlink"), reason="no symlinks")
-@pytest.mark.parametrize("listed", [True, False])
-def test_symlinks_as_pathlib_reads_them(
-    tmp_path: pathlib.Path, listed: bool,
-) -> None:
+@pytest.mark.skipif(not _HAS_LINKS, reason="no symlinks")
+def test_link_size_is_what_it_leads_to(tmp_path: pathlib.Path) -> None:
     _tree(tmp_path)
-    (tmp_path / "to-sub").symlink_to(tmp_path / "sub", True)
     (tmp_path / "to-scan").symlink_to(tmp_path / "scan.nii")
     (tmp_path / "dangling").symlink_to(tmp_path / "gone")
-    if listed:
-        paths = {c.name: c for c in Path(tmp_path).iterdir()}
-    else:
-        paths = {c.name: Path(c) for c in tmp_path.iterdir()}
-    for name in ("to-sub", "to-scan", "dangling"):
-        info, real = paths[name].pathinfo, tmp_path / name
-        for follow in (True, False):
-            assert info.exists(follow_symlinks=follow) == (
-                real.exists() if follow else True
-            ), name
-            assert info.is_dir(follow_symlinks=follow) == (
-                real.is_dir() if follow else False
-            ), name
-            assert info.is_file(follow_symlinks=follow) == (
-                real.is_file() if follow else False
-            ), name
-        assert info.is_symlink()
+    paths = {c.name: c for c in Path(tmp_path).iterdir()}
     assert paths["to-scan"].pathinfo.size() == 4
     assert paths["dangling"].pathinfo.size() is None
     assert paths["dangling"].pathinfo.mtime() is None
@@ -247,7 +385,6 @@ def test_no_leakage_to_derived_paths(tmp_path: pathlib.Path) -> None:
     assert not sub.with_name("scan.nii").pathinfo.is_dir()
 
 
-# -- walk and glob ------------------------------------------------------------
 def test_walk_directories_carry_their_listing(tmp_path: pathlib.Path) -> None:
     from bagof.paths._drivers import GenericAdapter
 
@@ -311,19 +448,38 @@ def test_driver_without_a_detailed_listing(tmp_path: pathlib.Path) -> None:
     assert _Plain.asked == []
     scan = children["scan.nii"]
     assert scan.pathinfo.is_file() and scan.pathinfo.exists()
+    assert _Plain.asked == ["is_file"]  # a file: the rest follows
     assert scan.pathinfo.size() == 4
-    assert not scan.pathinfo.is_symlink()  # no symlinks in this store
-    asked = list(_Plain.asked)
-    # Each question asked once, then kept.
+    assert _Plain.asked == ["is_file", "stat"]
+    # No symlinks in this store; the path itself is asked apart, as
+    # pathlib 3.14 asks its lstat apart from its stat.
+    assert not scan.pathinfo.is_symlink()
+    assert _Plain.asked == ["is_file", "stat", "exists", "is_file"]
     assert scan.pathinfo.is_file() and scan.pathinfo.size() == 4
-    assert _Plain.asked == asked
-    assert asked.count("stat") == 1 and asked.count("is_file") == 1
+    assert scan.pathinfo.exists(follow_symlinks=False)
+    assert len(_Plain.asked) == 4  # kept
     assert children["sub"].pathinfo.is_dir()
     assert children["sub"].pathinfo.size() is None
 
 
+@pytest.mark.parametrize(
+    "listed, kind, how, pre", [s for s in _LINK_FREE if s[0] == "unlisted"]
+)
+def test_unknown_driver_answers_as_pathlib_314_does(
+    tmp_path: pathlib.Path, listed: str, kind: str, how: str, pre: str,
+) -> None:
+    # Its listing says nothing, so its children are unlisted. Its answers
+    # come one call at a time, but a view's type answers are asked
+    # together, so they describe one moment, as one stat does.
+    _build(tmp_path, kind)
+    path = Path(_Plain(tmp_path)) / "t"
+    _pre(path.pathinfo, pre)
+    _change(tmp_path, how)
+    assert _bits(path.pathinfo) == _expected(listed, kind, how, pre)
+
+
 # -- AsyncPath over the stdlib ------------------------------------------------
-def test_async_listed_children_answer_without_a_thread(
+def test_async_listed_types_answer_without_a_thread(
     tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from bagof.paths import _bridge
@@ -343,35 +499,23 @@ def test_async_listed_children_answer_without_a_thread(
         types = {
             name: (
                 await c.pathinfo.is_dir(), await c.pathinfo.is_file(),
-                await c.pathinfo.exists(), await c.pathinfo.is_symlink(),
+                await c.pathinfo.is_symlink(),
             )
             for name, c in children.items()
         }
         listed_hops = len(hops)
         size = await children["scan.nii"].pathinfo.size()
+        exists = await children["scan.nii"].pathinfo.exists()
         missing = await (AsyncPath(tmp_path) / "nope").pathinfo.exists()
-        return types, listed_hops, size, missing, len(hops)
+        return types, listed_hops, size, exists, missing, len(hops)
 
-    types, listed_hops, size, missing, hops = asyncio.run(go())
+    types, listed_hops, size, exists, missing, hops = asyncio.run(go())
     assert types == {
-        "sub": (True, False, True, False),
-        "scan.nii": (False, True, True, False),
+        "sub": (True, False, False), "scan.nii": (False, True, False),
     }
     assert listed_hops == 0  # the listing's answers: no store call at all
     # Anything else is asked in a worker thread, never on the loop.
-    assert (size, missing, hops) == (4, False, 2)
-
-
-def test_async_snapshot_survives_a_delete(tmp_path: pathlib.Path) -> None:
-    _tree(tmp_path)
-
-    async def go() -> object:
-        scan = AsyncPath(tmp_path) / "scan.nii"
-        before = await scan.pathinfo.is_file()
-        await scan.unlink()
-        return before, await scan.pathinfo.is_file(), await scan.exists()
-
-    assert asyncio.run(go()) == (True, True, False)
+    assert (size, exists, missing, hops) == (4, True, False, 2)
 
 
 # -- universal-pathlib over memory:// -----------------------------------------
@@ -415,23 +559,31 @@ def _ask_everything(paths: object) -> dict:
     }
 
 
-def test_upath_iterdir_children_cost_no_further_calls(
+def test_upath_iterdir_types_cost_no_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     base = _memory_tree("memory://bagofpaths-info-iterdir/root")
     counts = _count_memory_calls(monkeypatch)
-    answers = _ask_everything(Path(base).iterdir())
-    assert answers == {
+    children = list(Path(base).iterdir())
+    assert {k: v for k, v in counts.items() if v} == {"ls": 1}
+    types = {
+        c.name: (c.pathinfo.is_dir(), c.pathinfo.is_file(),
+                 c.pathinfo.is_symlink())
+        for c in children
+    }
+    assert types == {
+        "sub": (True, False, False), "scan.nii": (False, True, False),
+    }
+    assert {k: v for k, v in counts.items() if v} == {"ls": 1}
+    assert _ask_everything(children) == {
         "sub": (True, False, True, False, None, False),
         "scan.nii": (False, True, True, False, 4, True),
     }
-    # The one listing; no child is asked anything.
-    assert {k: v for k, v in counts.items() if v} == {"ls": 1}
+    # exists(), size(), mtime(): one fs.info per child, when first asked.
+    assert {k: v for k, v in counts.items() if v} == {"ls": 1, "info": 2}
 
 
-def test_upath_iterdir_children_are_upaths_own(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_upath_iterdir_children_are_upaths_own() -> None:
     base = _memory_tree("memory://bagofpaths-info-same/root")
     ours = [c.wrapped for c in Path(base).iterdir()]
     assert ours == list(base.iterdir())
@@ -440,34 +592,6 @@ def test_upath_iterdir_children_are_upaths_own(
         list(Path(base / "nope").iterdir())
     with pytest.raises(NotADirectoryError):
         list(Path(base / "scan.nii").iterdir())
-
-
-@pytest.mark.parametrize(
-    "method, pattern",
-    [
-        ("glob", "*"), ("glob", "*.nii"), ("glob", "*/"), ("glob", "**"),
-        ("glob", "sub/*"), ("glob", "**/*.nii"), ("rglob", "*.nii"),
-        ("rglob", "*"), ("rglob", "*/"),
-    ],
-)
-def test_upath_glob_matches_upaths_own(
-    monkeypatch: pytest.MonkeyPatch, method: str, pattern: str,
-) -> None:
-    base = _memory_tree("memory://bagofpaths-info-glob/root")
-    counts = _count_memory_calls(monkeypatch)
-    native = [str(p) for p in getattr(base, method)(pattern)]
-    native_calls = dict(counts)
-    counts.update(dict.fromkeys(counts, 0))
-    matches = list(getattr(Path(base), method)(pattern))
-    assert [str(p) for p in matches] == native
-    # The same fs.glob as UPath's own: the detail costs nothing more ...
-    assert counts == native_calls
-    counts.update(dict.fromkeys(counts, 0))
-    asked = _ask_everything(matches)
-    # ... and the answers cost no further call.
-    assert counts == dict.fromkeys(_COUNTED, 0)
-    for name, (is_dir, is_file, exists, *_rest) in asked.items():
-        assert exists and is_dir != is_file, name
 
 
 def test_upath_walk_directories_carry_their_listing(
@@ -482,7 +606,7 @@ def test_upath_walk_directories_carry_their_listing(
     assert counts == dict.fromkeys(_COUNTED, 0)
 
 
-def test_upath_unlisted_path_asks_once(
+def test_upath_unlisted_path_reads_each_view_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     base = _memory_tree("memory://bagofpaths-info-once/root")
@@ -491,7 +615,9 @@ def test_upath_unlisted_path_asks_once(
     assert _ask_everything([scan]) == {
         "scan.nii": (False, True, True, False, 4, True),
     }
-    assert {k: v for k, v in counts.items() if v} == {"info": 1}
+    _ask_everything([scan])
+    # One fs.info for what it leads to, one for the path itself.
+    assert {k: v for k, v in counts.items() if v} == {"info": 2}
     (base / "scan.nii").unlink()
     assert scan.pathinfo.is_file()  # kept
     assert not scan.exists()  # the live answer
@@ -529,7 +655,7 @@ def test_upath_no_leakage_and_info_untouched() -> None:
     assert type(sub.info) is type(base.info)  # the driver's own object
 
 
-def test_async_upath_children_cost_no_further_calls(
+def test_async_upath_children_carry_their_types(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # A synchronous driver run in a thread: its listing's answers travel.
@@ -542,25 +668,92 @@ def test_async_upath_children_cost_no_further_calls(
         counts = _count_memory_calls(monkeypatch)
         for path in children + matches:
             found[path.name] = (
-                await path.pathinfo.is_dir(), await path.pathinfo.size()
+                await path.pathinfo.is_dir(), await path.pathinfo.is_file()
             )
         return found, {k: v for k, v in counts.items() if v}
 
     found, calls = asyncio.run(go())
     assert found == {
-        "sub": (True, None), "scan.nii": (False, 4), "x.nii": (False, 2),
+        "sub": (True, False), "scan.nii": (False, True),
+        "x.nii": (False, True),
     }
     assert calls == {}
 
 
-# -- cloudpathlib -------------------------------------------------------------
-def test_cloudpathlib_asks_once_and_keeps_it() -> None:
+# -- every link-free scenario, on the stores ----------------------------------
+def _store_change(
+    target: object, kind: str, how: str, make_dir: object, remove_dir: object,
+) -> None:
+    if how == "none":
+        return
+    if kind == "file":
+        target.unlink()
+    else:
+        remove_dir(target)
+    if how == "delete":
+        return
+    if (how == "replace") == (kind == "file"):
+        target.write_bytes(b"xx")
+    else:
+        make_dir(target)
+
+
+def _store_scenario(
+    root: object, listed: str, kind: str, how: str, pre: str,
+    make_dir: object, remove_dir: object,
+) -> str:
+    target = root / "t"
+    if kind == "file":
+        target.write_bytes(b"1234")
+    else:
+        make_dir(target)
+    path = (
+        next(c for c in Path(root).iterdir() if c.name == "t")
+        if listed == "listed" else Path(root) / "t"
+    )
+    _pre(path.pathinfo, pre)
+    _store_change(target, kind, how, make_dir, remove_dir)
+    return _bits(path.pathinfo)
+
+
+@pytest.mark.parametrize("listed, kind, how, pre", _LINK_FREE)
+def test_upath_answers_as_pathlib_314_does(
+    listed: str, kind: str, how: str, pre: str,
+) -> None:
+    UPath = pytest.importorskip("upath").UPath
+    root = UPath(f"memory://bagofpaths-info-table/{listed}-{kind}-{how}-{pre}")
+    got = _store_scenario(
+        root, listed, kind, how, pre,
+        lambda p: p.mkdir(parents=True), lambda p: p.rmdir(recursive=True),
+    )
+    assert got == _expected(listed, kind, how, pre)
+
+
+@pytest.mark.parametrize("listed, kind, how, pre", _CLOUD)
+def test_cloudpathlib_answers_as_pathlib_314_does(
+    listed: str, kind: str, how: str, pre: str,
+) -> None:
+    local = pytest.importorskip("cloudpathlib.local")
+    root = local.LocalS3Client().CloudPath(
+        f"s3://bagofpaths-info-table/{listed}-{kind}-{how}-{pre}"
+    )
+    # An object store has no empty directory: one holds a file.
+    got = _store_scenario(
+        root, listed, kind, how, pre,
+        lambda p: (p / "x").write_bytes(b"x"), lambda p: p.rmtree(),
+    )
+    assert got == _expected(listed, kind, how, pre)
+
+
+def test_cloudpathlib_iterdir_types_cost_no_call() -> None:
     local = pytest.importorskip("cloudpathlib.local")
     client = local.LocalS3Client()
     root = client.CloudPath("s3://bagofpaths-info/root")
     (root / "sub" / "inner.txt").write_bytes(b"in")
     (root / "scan.nii").write_bytes(b"0123")
     children = {c.name: c for c in Path(root).iterdir()}
+    assert sorted(children) == sorted(c.name for c in root.iterdir())
+    assert all(c._listing_facts() is not None for c in children.values())
     scan, sub = children["scan.nii"], children["sub"]
     assert (scan.pathinfo.is_file(), scan.pathinfo.size()) == (True, 4)
     assert scan.pathinfo.mtime() is not None

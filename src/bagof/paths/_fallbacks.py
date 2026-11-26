@@ -232,7 +232,25 @@ def _no_follow(name: str) -> tx.Callable[..., bool]:
 
 # name -> synthesis function, resolved by the engine from a Member.fallback
 # (or Member.keyword_fallback).
+def _shared_glob(recursive: bool) -> tx.Callable[..., tx.Any]:
+    def glob(
+        wrapper: tx.Any,
+        pattern: tx.Any,
+        case_sensitive: tx.Optional[bool] = None,
+        recurse_symlinks: bool = False,
+    ) -> tx.Iterator[tx.Any]:
+        """`glob`/`rglob` from `iterdir`: the shared glob's matches."""
+        matches = wrapper._glob(
+            pattern, case_sensitive, recurse_symlinks, recursive=recursive
+        )
+        return (match._wrapped for match in matches)
+
+    return glob
+
+
 FALLBACKS: tx.Dict[str, tx.Callable[..., tx.Any]] = {
+    "glob": _shared_glob(False),
+    "rglob": _shared_glob(True),
     "read_bytes": read_bytes,
     "read_text": read_text,
     "write_bytes": write_bytes,

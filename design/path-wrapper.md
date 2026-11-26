@@ -292,7 +292,7 @@ names the accessor `blob` instead of `key`):
 | `as_posix` | native | `'s3://bucket/…'` | **absent** | synthesize from `str` |
 | equality | native | `UPath(u) == AnyPath(u)` is `False` both ways even when `str` is equal | same | wrapper-level equality; see below |
 | bucket-relative | — | — (compute `path` minus `drive`) | `.key` (s3) / `.blob` (gs) | see below |
-| `glob` | `recurse_symlinks` 3.13+ | default `False` | default `True` (moot: no cloud symlinks) | pathlib defaults |
+| `glob` | `recurse_symlinks` 3.13+; `**`, trailing `/` changed in 3.13 | default `False`; ignores `case_sensitive` | default `True` (moot: no cloud symlinks); 3.12 selectors | one shared glob: 3.14's, on every driver (see below) |
 | `touch` | `(mode, exist_ok)` | `(mode, exist_ok)` | `(exist_ok, mode)` — **order differs** | forward by keyword only |
 | `exists`/`is_*` on an error | < 3.14: raise any `OSError` but "not found" (`ENAMETOOLONG`, `EACCES` on a parent); 3.14: `os.path.exists`/`isfile`/`isdir`, the rest catch `(OSError, ValueError)` — always `False` | the backend's own | the backend's own | local path: 3.14 on every version, `False`; `stat()` still raises. Remote: the driver's own (issue #24) |
 
@@ -700,48 +700,82 @@ registry.
   returning a `datetime` (a second time type beside `stat()`'s), and
   properties (no async twin).
 
+  *Two views, as pathlib 3.14 keeps them [settled, owner].* Measured on
+  CPython 3.14.6 (Linux) for a file, a directory, a link to each and a
+  dangling link, listed (`iterdir`) or not (`root / name`), after a delete,
+  a replacement, a change of type and (for a link) a deleted target, with
+  nothing, `is_file()` or `is_symlink()` asked before the change (the table
+  is in `tests/test_pathinfo.py`, re-measured there on 3.14):
+
+  - *Not listed* (`_PosixPathInfo`): two separate reads, each made the first
+    time a question needs it and then kept -- one `stat` for `exists()`,
+    `is_dir()`, `is_file()`, and one `lstat` for `is_symlink()` and the
+    `follow_symlinks=False` forms. So a file deleted after `is_file()` was
+    asked still `exists()` but not `exists(follow_symlinks=False)`.
+  - *Listed* (`DirEntryInfo`): the type of an entry that is not a link is
+    the listing's (`d_type`), whatever happens later: a deleted file is
+    still `is_file()`; `exists(follow_symlinks=False)` is always true.
+    `exists()` (and, for a link, `is_dir()`/`is_file()`) reads the entry's
+    `stat` when first asked; `os.DirEntry` keeps a stat that succeeded and
+    not one that failed, so a deleted entry answers `exists() == False`
+    and asks again next time.
+
+  `pathinfo` keeps the same two views, `LSTAT` (the path itself) and `STAT`
+  (what it leads to), and the same rule of which answers which, on every
+  driver and Python version. A listing fills `LSTAT` (an `os.DirEntry` or
+  `DirEntryInfo`, read lazily; an fsspec info dict's `type`/`islink`; a
+  cloudpathlib listing's directory/file split); `STAT` is read the first
+  time it is needed. **`size()` and `mtime()` belong to `STAT`**: they are
+  read with `exists()`, by the same call, when one of them is first asked --
+  not snapshotted from the listing, though an fsspec listing holds a size,
+  because then a deleted listed file would answer `exists() == False` with
+  `size() == 4`, two moments in one record. 3.14's own `_mod_time_ns()`
+  (what `copy` reads) takes the time from that same stat. The cost is the
+  one request per entry the consumer pays to *size* it; classifying it
+  (`is_dir`/`is_file`/`is_symlink`) stays free. The old answer (keep
+  every listed answer, even `exists()`, after a delete) is gone.
+
   *Filled from the listing, at no extra cost,* on the paths `iterdir`,
-  `glob`/`rglob` and `walk` (the directories it yields) produce, where the
-  driver lists with detail:
+  `glob`/`rglob` and `walk` (the directories it yields) produce:
 
   | Driver | How the listing keeps its detail |
   |---|---|
   | stdlib, pathlib < 3.14 | `iterdir` lists with `os.scandir` (as 3.13's own does), when the running pathlib would: at the call on 3.13, at the first item before; the entry is kept, as 3.14 keeps it |
   | stdlib, pathlib >= 3.14 | pathlib's own `iterdir`, its children untouched; their `info` (a `DirEntryInfo`) is the entry |
-  | UPath over fsspec | `iterdir`: one `fs.ls(detail=True)`, children built as UPath's own iterdir builds them (Part 1's listing, which also saves UPath's up-front `isdir`); `glob`/`rglob`: UPath's own algorithm step for step, with `fs.glob(..., detail=True)` -- the same single `find(detail=True)` UPath makes, so the same calls and the same paths (parity-tested per pattern) |
-  | `AsyncFSPath` | `_ls(detail=True)`, `_glob(detail=True)`, `_walk(detail=True)` |
+  | UPath over fsspec | `iterdir`: one `fs.ls(detail=True)`, children built as UPath's own iterdir builds them (Part 1's listing, which also saves UPath's up-front `isdir`); `glob`/`rglob`: the shared glob (below) over that listing, or one `fs.find(detail=True)` for a `**` |
+  | cloudpathlib | `iterdir`: its `walk(lazy=True)`, one listing that keeps the directory/file split its `iterdir` drops; a `**`: one `walk()` (a single recursive listing) |
+  | `AsyncFSPath` | `_ls(detail=True)`, `_find(detail=True)` for a `**`, `_walk(detail=True)` |
 
-  Not carried, and asked once instead: cloudpathlib (its listing's `is_dir`
-  is behind the private `client._list_dir`), the stdlib's `glob` (pathlib
-  keeps no entry), pathlib's native `walk` (3.12+), a UPath flavour with its
-  own `iterdir`/`glob` (http, a `file://` UPath, smb), a call with
-  `case_sensitive=`/`recurse_symlinks=` (left to UPath, which warns), a
-  relative UPath, and an fsspec whose `**` UPath works around. `walk`
-  yields file *names*, so a file's facts come from `iterdir`/`glob`; a
-  child built from a name is a derived path (below).
+  Not carried, and read when asked instead: pathlib's native `walk` (3.12+),
+  a UPath flavour with its own `iterdir` (http, a `file://` UPath, smb),
+  and a driver whose listing says nothing (an unknown driver's `iterdir`).
+  `walk` yields file *names*, so a file's facts come from `iterdir`/`glob`;
+  a child built from a name is a derived path (below).
 
-  *Asked once, otherwise.* The first question asks the store, with as few
-  calls as the driver allows, and every answer is kept: one `os.lstat` (and
-  `os.stat` for a link) for a stdlib path; one `fs.info` for UPath; one
-  `fs._info` for `AsyncFSPath`; for any other driver, one call per question
-  through the path's own status members and one `stat()` for size and time.
-  A path that cannot be reached does not raise, as in pathlib 3.14: an
-  `OSError` reads as "not there", and a store without `is_symlink` has no
-  links (a driver with no `exists`/`is_dir` at all still raises
-  `UnsupportedPathOperation`). fsspec
-  reports a symbolic link as the link itself (its local listing calls a
-  link to a directory `"other"`), so only "it is a link" is taken from such
-  an entry and what it leads to is asked.
+  *Reading a view.* As few calls as the driver allows: `os.lstat` or
+  `os.stat` for a stdlib path; one `fs.info` for UPath (which gives a link
+  and what it leads to; a dangling local link is asked `fs.islink`); one
+  `fs._info` for `AsyncFSPath`. Any other driver (cloudpathlib, an unknown
+  one) is asked through the path's own status members: its type answers
+  together, starting from the one asked (`is_file()`, then `is_dir()`,
+  then `exists()`, stopping when settled), so they describe one moment as
+  one stat does; `is_symlink()` (none: no links) for `LSTAT`, then the same
+  type read; and one `stat()` for size and time. A path that cannot be
+  reached does not raise, as in pathlib 3.14: an `OSError` reads as "not
+  there", and a store without `is_symlink` has no links (a driver with no
+  `exists`/`is_dir` at all still raises `UnsupportedPathOperation`).
 
-  *Point-in-time.* An answer says what the path was when it was obtained:
-  deleting the file afterwards changes `exists()`, not `pathinfo.exists()`.
-  One deliberate divergence from 3.14: its `DirEntryInfo.exists()` stats
-  the entry again, so a listed file deleted afterwards answers
-  `is_file() == True` but `exists() == False`; ours answers `exists()` from
-  the listing too (only a link can lead nowhere), so the answers agree with
-  each other, as 3.14's own `PathInfo` of an unlisted path does. A local
-  listing's size and time are read when first asked (`os.scandir` has no
-  size on POSIX), and kept from then on.
+  *What cannot be matched exactly (documented, tested where it shows).*
+  (1) A driver with no single status read (cloudpathlib, unknown drivers)
+  reads `size()`/`mtime()` with its own `stat()`, apart from the type
+  answers, so a file replaced between the two shows its new size with its
+  old type. (2) Windows: 3.14's `DirEntryInfo.exists()` there comes from
+  the listing (`FindNextFile` data), not a fresh stat; `pathinfo` delegates
+  to the same `os.DirEntry`, so it follows the running platform, as 3.14
+  does, while a remote listing is read when asked on every platform. (3) A
+  filesystem without `d_type` makes `os.DirEntry` lstat lazily; the async
+  front-end reads that in the listing's worker thread, slightly earlier
+  than the first question.
 
   *Never on a derived path.* The record lives on the wrapper (the private
   `_snapshot` slot), `with_wrapped` clears it, and `__getstate__` leaves it
@@ -754,13 +788,71 @@ registry.
   *On `AsyncPath`* every method is a coroutine, like every async I/O member,
   and none makes a blocking call on the event loop: a synchronous driver's
   listing runs in the worker thread as before, and there each child's lazy
-  entry is *frozen* (its type answers copied out), so the loop never touches
-  an `os.DirEntry`; a query runs in a worker thread for a synchronous driver
-  (or a native local one, through its stdlib view) and is awaited on
-  `AsyncFSPath`. The parity rule is extended accordingly: `test_parity.py`
-  holds `PathInfo` and `AsyncPathInfo` to the same mirror-image rule as the
-  two wrappers (same public methods, same signatures, coroutines on one
-  side only), since a property is invisible to the method checks.
+  entry is *frozen* (its `LSTAT` answers copied out), so the loop never
+  touches an `os.DirEntry`; a query runs in a worker thread for a
+  synchronous driver (or a native local one, through its stdlib view) and
+  is awaited on `AsyncFSPath`. The parity rule is extended accordingly:
+  `test_parity.py` holds `PathInfo` and `AsyncPathInfo` to the same
+  mirror-image rule as the two wrappers (same public methods, same
+  signatures, coroutines on one side only), since a property is invisible
+  to the method checks.
+- **One shared `glob` [settled, owner] (#64).** `glob`/`rglob` are no
+  longer delegated: one glob runs on every driver and Python version, so a
+  pattern matches the same names on a local disk, in a bucket and on 3.8
+  as on 3.14, the convention `match`/`full_match` already follow. Measured
+  before deciding (CPython 3.8/3.12/3.13/3.14, universal-pathlib 0.3.11,
+  cloudpathlib 0.26, on one tree; the 3.14 results are the tables of
+  `tests/test_glob.py`):
+
+  | Pattern | pathlib 3.14 | pathlib 3.8-3.12 | UPath (memory) | cloudpathlib | **wrapper** |
+  |---|---|---|---|---|---|
+  | `**`, `sub/**` | files and directories | directories only | as 3.14 | directories only | 3.14 |
+  | `*/`, `**/*/` (trailing `/`) | directories only | 3.8: ignored; 3.12: as 3.14 | as 3.14 | ignored | 3.14 |
+  | `a.txt/` | nothing | 3.8: `a.txt` | as 3.14 | `a.txt` | 3.14 |
+  | `case_sensitive=False` | honoured | honoured (3.12+) | ignored, with a warning | honoured | 3.14, every driver |
+  | `./a.txt`, `sub//x` | normalized | normalized | nothing matches | normalized | 3.14 |
+  | `sub/../a.txt` | `sub/../a.txt` | same | nothing (a store has no `..`) | raises | 3.14 locally; see below |
+  | `*` on `.hidden` | matches | matches | matches | matches | matches |
+  | `recurse_symlinks` | 3.13+ | 3.13+ (ignored before) | accepted, no links | accepted, no links | 3.14 |
+
+  *How.* `_glob.py` is CPython 3.14's `glob._GlobberBase` selectors and
+  `pathlib.Path.glob` pattern parsing (PSF; NOTICE.md), matching with the
+  vendored `glob.translate` of `_match.py` (3.13's, which is 3.14's but for
+  spelling: `\Z`/`\z`, where set operators are escaped). It walks wrapper
+  paths, not strings, and does no I/O itself: a selector yields a request
+  (list this directory, is this entry a directory, does this path exist)
+  and is sent the answer, so the same generator serves `Path` (`iterate`)
+  and `AsyncPath` (`aiterate`). A directory's entries are the wrapper's own
+  `iterdir()` children, so every match carries its listing as `pathinfo`
+  and "is it a directory" is `pathinfo.is_dir(follow_symlinks=...)` --
+  free for a listed entry. Where the store has one recursive call, a `**`
+  asks the adapter for it before it walks (`glob_tree`): UPath's
+  `fs.find(withdirs=True, detail=True)` (a non-local store; a single
+  paginated listing on s3fs/gcsfs/adlfs), cloudpathlib's `walk()`, and
+  `AsyncFSPath`'s `_find`; the directory listings below are then served
+  from it, so `rglob("*.nii")` is one call there. The stdlib is walked one
+  `os.scandir` per directory, as 3.14 walks it (and, as 3.14, a `**`
+  followed by a wildcard lists each directory twice unless
+  `recurse_symlinks`); a store with links is never served from a tree, and
+  a link reached by `recurse_symlinks` is listed the ordinary way.
+
+  Calls for `rglob("*.nii")` on a 6-directory tree: stdlib 12 `os.scandir`
+  (6 with `recurse_symlinks=True`), UPath `memory://` 1 `find`, cloudpathlib
+  1 recursive listing, `AsyncFSPath` 1 `_find`; a pattern without `**`
+  (`*/*.txt`) lists each directory it reaches once.
+
+  *Reconciled, and tested:* a driver's `glob` is used only when it cannot
+  list (no `iterdir`), so a glob-only driver keeps what it had; an
+  iterdir-only driver gains `glob` (`supports("glob")` says so, through a
+  spec fallback). Two store differences stay, as data, not matching: a
+  store has no `..` entry, so a pattern through one names nothing on
+  UPath/`AsyncFSPath` (`memory://`), while cloudpathlib's own `/` resolves
+  `..` lexically, so there the match names the file it reaches; and an
+  object store has no empty directory. Results are yielded in listing
+  order (3.14's order, given the same listing), not sorted. UPath's own
+  `glob` agreed with 3.14 on the measured patterns but for those above, so
+  the parity tests hold the wrapper to UPath's own results wherever UPath
+  is 3.14's.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/

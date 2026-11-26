@@ -684,7 +684,7 @@ def test_upath_listing_snapshot_stays_on_the_listed_child() -> None:
     wrapper = Path(base)
     children = adapter_for(base)._listing(wrapper, known_dir=False)
     child = next(c for c in children if c.name == "d0")
-    assert child._snapshot.get("dir") is True
+    assert child._snapshot.get("lstat", "dir") is True
     for derived in (child / "f0.txt", child.parent, child.with_name("d9")):
         assert getattr(derived, "_snapshot", None) is None
     child.rmdir(recursive=True)

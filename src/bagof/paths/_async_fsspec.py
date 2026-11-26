@@ -48,7 +48,7 @@ import typing_extensions as tx
 
 from ._args import is_url, path_text
 from ._errors import UnsupportedPathOperation
-from ._pathinfo import MISSING, info_facts, listed_facts
+from ._pathinfo import info_view, listed_facts
 
 # loop -> {(scheme, options-token): AsyncFileSystem}. Weak on the loop so a
 # finished loop's filesystem (and any session it holds) becomes collectable.
@@ -572,14 +572,14 @@ class AsyncFSPath:
         fs = await self._fs()
         return _stat_from_info(await fs._info(self._path))
 
-    async def _store_facts(self) -> tx.Dict[str, tx.Any]:
-        """What one `fs._info()` says about this path, for `pathinfo`."""
+    async def _store_facts(self, view: str) -> tx.Dict[str, tx.Any]:
+        """One view of this path from one `fs._info()`, for `pathinfo`."""
         fs = await self._fs()
         try:
             info = await fs._info(self._path)
         except (OSError, ValueError):
-            return dict(MISSING)
-        return info_facts(info) if isinstance(info, dict) else {}
+            return {"exists": False}
+        return info_view(info, view) if isinstance(info, dict) else {}
 
     async def touch(self, **_: tx.Any) -> None:
         # Create an empty object when absent; an object store cannot bump the
@@ -662,37 +662,33 @@ class AsyncFSPath:
         fs = await self._fs()
         # The detailed listing costs the same call and keeps each child's
         # type, so a walk over these children asks no child again.
+        here = self._path.rstrip("/")
         for entry in await fs._ls(self._path, detail=True):
+            name = entry.get("name") if isinstance(entry, dict) else entry
+            if str(name).rstrip("/") == here:
+                continue  # an object store can list the directory itself
             yield self._listed(entry)
 
-    async def glob(
-        self, pattern: str, **_: tx.Any
-    ) -> tx.AsyncIterator[AsyncFSPath]:
+    async def _glob_tree(self) -> tx.Optional[tx.Tuple[tx.Any, ...]]:
+        """The subtree below this path in one `fs._find()`, for the shared
+        glob: its base, how a path is keyed, and `(parent, key, child)`."""
         fs = await self._fs()
-        joined = "{}/{}".format(self._path.rstrip("/"), pattern)
-        async for child in self._globbed(fs, joined):
-            yield child
-
-    async def _globbed(
-        self, fs: tx.Any, pattern: str
-    ) -> tx.AsyncIterator[AsyncFSPath]:
-        # fsspec's glob lists with detail and keeps only the names unless
-        # asked; asking keeps what the listing said about each match.
-        found = await fs._glob(pattern, detail=True)
-        if isinstance(found, dict):
-            for name, info in found.items():
-                yield self._listed(info, name)
-        else:  # a backend that ignores detail
-            for name in found:
-                yield self._child(name)
-
-    async def rglob(
-        self, pattern: str, **_: tx.Any
-    ) -> tx.AsyncIterator[AsyncFSPath]:
-        fs = await self._fs()
-        joined = "{}/**/{}".format(self._path.rstrip("/"), pattern)
-        async for child in self._globbed(fs, joined):
-            yield child
+        base = self._path.rstrip("/")
+        try:
+            found = await fs._find(base, withdirs=True, detail=True)
+        except (OSError, ValueError):
+            return None
+        if not isinstance(found, dict):  # a backend that ignores detail
+            return None
+        entries = []
+        for name, info in found.items():
+            name = str(name).rstrip("/")
+            if not name.startswith(base + "/"):
+                continue  # the directory itself
+            parent, _, leaf = name.rpartition("/")
+            if leaf not in ("", ".", ".."):
+                entries.append((parent, name, self._listed(info, name)))
+        return base, _fs_key, entries
 
     # -- creation / removal -------------------------------------------------
     async def mkdir(self, **kwargs: tx.Any) -> None:
@@ -837,3 +833,8 @@ class AsyncFSPath:
         if not directory.is_absolute():
             directory = self._pure.parent / directory
         return self._derive(directory / self._pure.name)
+
+
+def _fs_key(path: AsyncFSPath) -> str:
+    """A path's place in its store, as fsspec's listings name it."""
+    return path._path.rstrip("/")

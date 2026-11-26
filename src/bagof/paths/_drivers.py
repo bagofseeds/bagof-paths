@@ -31,15 +31,16 @@ import sys
 
 import typing_extensions as tx
 
+from . import _glob
 from ._errors import UnsupportedPathOperation
 from ._pathinfo import (
-    MISSING,
-    UNKNOWN,
+    LSTAT,
     Facts,
     ask,
-    info_facts,
+    info_view,
     listed_facts,
-    stat_facts,
+    stat_view,
+    typed_facts,
 )
 
 
@@ -81,7 +82,7 @@ def _is_stock(wrapped: tx.Any, base: type, names: tx.Iterable[str]) -> bool:
 
 def _is_listed_dir(facts: tx.Optional[Facts]) -> bool:
     """Whether a listed child is (or may be) a directory."""
-    return facts is None or facts.get("dir") is not False
+    return facts is None or facts.get(LSTAT, "dir") is not False
 
 
 def _lists_with_fsspec(wrapped: tx.Any) -> bool:
@@ -268,29 +269,29 @@ class GenericAdapter:
 
         return lazily()
 
-    def listed_glob(
-        self, wrapper: tx.Any, pattern: str, *, recursive: bool
-    ) -> tx.Optional[tx.Iterator[tx.Any]]:
-        """`glob()`/`rglob()` matches with the listing's answers, or None.
+    def glob_tree(self, wrapper: tx.Any) -> tx.Optional[_glob.Tree]:
+        """The subtree below `wrapper` in one recursive listing, or None.
 
-        None leaves the match to the driver. Called only for a string
-        pattern and the default keywords.
+        Asked by the shared glob when a `**` is about to walk a directory.
+        None (the default) walks it one listing per directory, as pathlib
+        does: right for a store with symbolic links, which a recursive
+        listing does not follow.
         """
         return None
 
     def query_facts(
-        self, wrapper: tx.Any, key: str, facts: Facts
+        self, wrapper: tx.Any, view: str, key: str, facts: Facts
     ) -> tx.Dict[str, tx.Any]:
         """What the store says about `wrapper` (a synchronous `Path`).
 
-        Returns at least the fact `key`, and every other one the same call
-        gave. A stdlib local path answers everything from `os.lstat` (and
-        `os.stat` for a link); any other driver is asked through the path's
-        own status members.
+        Returns at least the fact `key` of `view`, and every other one the
+        same call gave. A stdlib local path answers a whole view from
+        `os.lstat` or `os.stat`; any other driver is asked through the
+        path's own status members.
         """
         if _is_stock_local(wrapper._wrapped):
-            return stat_facts(wrapper._wrapped)
-        return ask(wrapper, key, facts)
+            return stat_view(wrapper._wrapped, view)
+        return ask(wrapper, view, key, facts)
 
     def _walk_fallback(
         self,
@@ -315,11 +316,13 @@ class GenericAdapter:
         for entry in entries:
             facts = entry._listing_facts()
             try:
-                is_dir = None
                 if facts is not None:
-                    # The listing's answer: no query per child.
-                    is_dir = _listed_is_dir(facts, follow_symlinks)
-                if is_dir is None:
+                    # The listing's answer (no query per child), but for
+                    # where a followed link leads, which is asked once.
+                    is_dir = entry.pathinfo.is_dir(
+                        follow_symlinks=follow_symlinks
+                    )
+                else:
                     is_dir = entry.is_dir()
                     # Mirror native walk: with follow_symlinks=False a
                     # symlinked directory is classified as a file
@@ -357,22 +360,6 @@ class GenericAdapter:
             )
         if not top_down:
             yield wrapper, dirnames, filenames
-
-
-def _listed_is_dir(facts: Facts, follow_symlinks: bool) -> tx.Optional[bool]:
-    """Whether a listed child is a directory, by the listing alone.
-
-    None where the listing does not say (a symbolic link it reports as the
-    link, when the walk follows links).
-    """
-    if not follow_symlinks:
-        link = facts.get("symlink")
-        if link is True:
-            return False
-        if link is UNKNOWN:
-            return None
-    value = facts.get("dir")
-    return None if value is UNKNOWN else value
 
 
 class UPathAdapter(GenericAdapter):
@@ -422,6 +409,7 @@ class UPathAdapter(GenericAdapter):
             return super()._listing(wrapper, known_dir=known_dir)
         # The children UPath's iterdir gives, from fs.ls(detail=True): the
         # directory itself, "."/".." and a repeated name are not children.
+        # Derived from universal-pathlib's UPath.iterdir (MIT; NOTICE.md).
         sep = getattr(getattr(wrapped, "parser", None), "sep", "/")
         base = wrapped.parent if wrapped.parts[-1:] == ("",) else wrapped
         fs = base.fs
@@ -480,106 +468,86 @@ class UPathAdapter(GenericAdapter):
 
         return lazily()
 
-    def listed_glob(
-        self, wrapper: tx.Any, pattern: str, *, recursive: bool
-    ) -> tx.Optional[tx.Iterator[tx.Any]]:
-        # UPath's glob is one fs.glob(), which lists with detail and keeps
-        # only the names; asking for the detail costs nothing more. The
-        # match is UPath's own, step for step, so the paths are the same.
+    def glob_tree(self, wrapper: tx.Any) -> tx.Optional[_glob.Tree]:
+        # One fs.find(): a single paginated listing on an object store
+        # (s3fs, gcsfs, adlfs). A local or symbolic-link store is walked one
+        # directory at a time, as pathlib walks it.
         wrapped = wrapper._wrapped
-        upath = _upath_class()
-        if not _lists_with_fsspec(wrapped) or not _is_stock(
-            wrapped, upath, ("glob", "rglob", "_fs_glob", "joinpath")
+        if (
+            not _lists_with_fsspec(wrapped) or wrapper.is_local()
+            or not _is_stock(wrapped, _upath_class(), ("iterdir",))
+            or getattr(wrapped, "_relative_base", None) is not None
         ):
             return None
-        if getattr(wrapped, "_relative_base", None) is not None:
-            return None  # a relative UPath globs from its absolute form
-        if recursive and not _fsspec_glob_works():
-            return None  # UPath works around an old fsspec's "**"
-        sep = getattr(getattr(wrapped, "parser", None), "sep", None)
-        if not isinstance(sep, str):
+        sep = getattr(getattr(wrapped, "parser", None), "sep", "/")
+        base = wrapped.parent if wrapped.parts[-1:] == ("",) else wrapped
+        base_path = _drop_suffix(base.path, sep)
+        try:
+            found = base.fs.find(base_path, withdirs=True, detail=True)
+        except (OSError, ValueError):
             return None
-        return self._glob(wrapper, pattern, recursive, sep)
-
-    def _glob(
-        self, wrapper: tx.Any, pattern: str, recursive: bool, sep: str
-    ) -> tx.Iterator[tx.Any]:
-        wrapped = wrapper._wrapped
-        dirs_only = pattern.endswith(sep)
-        if recursive:
-            path_pattern = wrapped.joinpath("**", pattern).path
-        else:
-            path_pattern = wrapped.joinpath(pattern).path
-        base = wrapped.path
-        if dirs_only:
-            # Filtered by type, not by a trailing separator, as UPath does.
-            path_pattern = path_pattern.rstrip(sep)
-        found = wrapped.fs.glob(path_pattern, detail=True)
         if not isinstance(found, dict):  # a backend that ignores detail
-            found = {name: None for name in found}
-        seen = set()
-        for name, info in found.items():
-            if dirs_only:
-                if not isinstance(info, dict) or info.get("type") != (
-                    "directory"
-                ):
+            return None
+        rebuild = getattr(base, "with_segments", None)
+
+        def entries() -> tx.Iterator[tx.Tuple[str, str, tx.Any]]:
+            for name, info in found.items():
+                name = _drop_suffix(name, sep)
+                if not name.startswith(base_path + sep):
+                    continue  # the directory itself
+                parent, _, leaf = name.rpartition(sep)
+                if leaf in ("", ".", ".."):
                     continue
-                name = name.rstrip(sep)
-                if name in seen:
-                    continue
-                seen.add(name)
-            name = _drop_prefix(_drop_prefix(name, base), sep)
-            yield wrapper._listed(wrapped.joinpath(name), listed_facts(info))
+                child = (
+                    rebuild(parent, leaf) if callable(rebuild)
+                    else base / name[len(base_path) + 1:]
+                )
+                yield parent, name, wrapper._listed(child, listed_facts(info))
+
+        return _glob.tree_from(base_path, _fsspec_key, entries())
 
     def query_facts(
-        self, wrapper: tx.Any, key: str, facts: Facts
+        self, wrapper: tx.Any, view: str, key: str, facts: Facts
     ) -> tx.Dict[str, tx.Any]:
-        # One fs.info() answers every question (UPath's own is_dir, is_file
+        # One fs.info() answers a whole view (UPath's own is_dir, is_file
         # and exists each make that call).
         wrapped = wrapper._wrapped
         if not _lists_with_fsspec(wrapped):
-            return super().query_facts(wrapper, key, facts)
+            return super().query_facts(wrapper, view, key, facts)
+        fs = wrapped.fs
         try:
-            info = wrapped.fs.info(wrapped.path)
+            info = fs.info(wrapped.path)
         except (OSError, ValueError):
-            return dict(MISSING)
-        found = info_facts(info) if isinstance(info, dict) else {}
-        if key not in found:
-            # A symbolic link: what it leads to is asked.
-            found.update(ask(wrapper, key, Facts(found)))
-        return found
+            # fsspec's local info() follows a link, so a dangling one is
+            # missing there; the link itself exists.
+            if view == LSTAT and _is_link(fs, wrapped.path):
+                return {"exists": True, "symlink": True}
+            return {"exists": False}
+        if not isinstance(info, dict):
+            return ask(wrapper, view, key, facts)
+        return info_view(info, view)
+
+
+def _fsspec_key(path: tx.Any) -> str:
+    """A UPath's place in its store, as fsspec's listings name it."""
+    wrapped = path._wrapped
+    sep = getattr(getattr(wrapped, "parser", None), "sep", "/")
+    if wrapped.parts[-1:] == ("",):
+        wrapped = wrapped.parent
+    return _drop_suffix(wrapped.path, sep)
+
+
+def _is_link(fs: tx.Any, name: str) -> bool:
+    try:
+        return bool(fs.islink(name))
+    except (AttributeError, OSError, ValueError):
+        return False
 
 
 def _upath_class() -> type:
     from upath import UPath
 
     return UPath
-
-
-_GLOB_WORKS: tx.List[bool] = []
-
-
-def _fsspec_glob_works() -> bool:
-    """Whether fsspec's glob matches "**" across directories.
-
-    The check universal-pathlib makes before its rglob trusts a single
-    fs.glob(); an older fsspec needs its two-pattern workaround, which is
-    left to UPath.
-    """
-    if not _GLOB_WORKS:
-        from fsspec.implementations.memory import MemoryFileSystem
-
-        probe = type(
-            "_Probe", (MemoryFileSystem,), {"store": {}, "pseudo_dirs": [""]}
-        )()
-        probe.touch("a.txt")
-        probe.touch("f/b.txt")
-        _GLOB_WORKS.append(len(probe.glob("**/*.txt")) == 2)
-    return _GLOB_WORKS[0]
-
-
-def _drop_prefix(text: str, prefix: str) -> str:
-    return text[len(prefix):] if prefix and text.startswith(prefix) else text
 
 
 def _drop_suffix(text: str, suffix: str) -> str:
@@ -611,6 +579,53 @@ class CloudPathAdapter(GenericAdapter):
 
     def move(self, wrapper: tx.Any, target: tx.Any) -> None:
         wrapper._wrapped.move(target)
+
+    def listed_children(
+        self, wrapper: tx.Any
+    ) -> tx.Optional[tx.Iterator[tx.Any]]:
+        # cloudpathlib's iterdir drops what its listing says about each
+        # child; its lazy walk keeps it, from the same single listing.
+        walk = getattr(wrapper._wrapped, "walk", None)
+        if not callable(walk) or not _accepts(walk, "lazy"):
+            return None
+
+        def lazily() -> tx.Iterator[tx.Any]:
+            rows = walk(lazy=True)
+            try:
+                top, dirnames, filenames = next(rows)
+            finally:
+                rows.close()
+            for names, is_dir in ((dirnames, True), (filenames, False)):
+                for name in names:
+                    yield wrapper._listed(top / name, typed_facts(is_dir))
+
+        return lazily()
+
+    def glob_tree(self, wrapper: tx.Any) -> tx.Optional[_glob.Tree]:
+        # cloudpathlib's walk lists the whole subtree in one call.
+        walk = getattr(wrapper._wrapped, "walk", None)
+        if not callable(walk):
+            return None
+
+        def entries() -> tx.Iterator[tx.Tuple[str, str, tx.Any]]:
+            for top, dirnames, filenames in walk():
+                key = _cloud_key(top)
+                for names, is_dir in ((dirnames, True), (filenames, False)):
+                    for name in names:
+                        child = top / name
+                        yield key, _cloud_key(child), wrapper._listed(
+                            child, typed_facts(is_dir)
+                        )
+
+        return _glob.tree_from(
+            _cloud_key(wrapper._wrapped),
+            lambda path: _cloud_key(path._wrapped),
+            entries(),
+        )
+
+
+def _cloud_key(path: tx.Any) -> str:
+    return str(path).rstrip("/")
 
 
 _GENERIC = GenericAdapter()

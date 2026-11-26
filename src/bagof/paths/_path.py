@@ -6,7 +6,7 @@ import os
 
 import typing_extensions as tx
 
-from . import _drivers, _staged
+from . import _drivers, _glob, _staged
 from . import _engine as engine
 from ._base import BaseWrapper
 from ._local_copy import LocalCopyMixin
@@ -98,9 +98,9 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         """What the path is -- directory, file, link -- with its size and
         modification time, each answer obtained once and then kept.
 
-        A path from `iterdir`, `glob`, `rglob` or `walk` already holds what
-        the listing said wherever the store reports it, so classifying the
-        entries of a large remote directory costs the one listing:
+        A path from `iterdir`, `glob`, `rglob` or `walk` already knows what
+        its listing said it is, so classifying the entries of a large
+        remote directory costs the one listing:
 
         ```pycon
         >>> import tempfile
@@ -117,23 +117,27 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
         ```python
         for child in Path("s3://bucket/dataset").iterdir():   # one listing
-            if child.pathinfo.is_file():
-                print(child.name, child.pathinfo.size())
+            if child.pathinfo.is_file():                      # no request
+                print(child.name, child.pathinfo.size())      # one request
         ```
 
-        Any other path asks the store the first time an answer is needed.
-        The answers say what the path was when they were obtained, as
-        `pathlib`'s `info` does from Python 3.14: they do not change when
-        the file does (ask `is_dir()` or `exists()` for that), and a path
-        derived from this one (`parent`, `/`, `with_name`, ...) does not
-        carry them. `info` is left as the driver's own object.
+        `exists()`, `size()` and `mtime()` are read together, the first
+        time one of them is asked, and so is anything about a path that was
+        not listed. The rules are those of `pathlib`'s `info` from Python
+        3.14, on every driver and version: an answer says what the path was
+        when it was obtained and does not change when the file does (ask
+        `is_dir()` or `exists()` for that), and a path derived from this
+        one (`parent`, `/`, `with_name`, ...) does not carry it. `info` is
+        left as the driver's own object.
         """
         return self._info_view(PathInfo)
 
-    def _query_facts(self, key: str, facts: Facts) -> tx.Dict[str, tx.Any]:
+    def _query_facts(
+        self, view: str, key: str, facts: Facts
+    ) -> tx.Dict[str, tx.Any]:
         """What the store says about this path, for `pathinfo`."""
         return _drivers.adapter_for(self._wrapped).query_facts(
-            self, key, facts
+            self, view, key, facts
         )
 
     def lstat(self) -> os.stat_result:
@@ -444,20 +448,29 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
     ) -> tx.Iterator[tx.Self]:
         """Yield the paths matching `pattern` under this directory.
 
-        Like `iterdir`, each holds what the listing said about it as its
-        `pathinfo`, where the store reports it.
+        The matches are Python 3.14's, on every driver and Python version:
+        `*` matches hidden names too, a pattern ending in `**` matches
+        files and directories, one ending in `/` matches directories only,
+        and `**` does not enter a symbolic link unless `recurse_symlinks`.
+        Like `iterdir`, each path holds what the listing said about it as
+        its `pathinfo`.
+
+        ```pycon
+        >>> import tempfile
+        >>> folder = Path(tempfile.mkdtemp())
+        >>> (folder / "sub").mkdir()
+        >>> (folder / "sub" / "scan.nii").write_bytes(b"0123")
+        4
+        >>> sorted(p.relative_to(folder).as_posix() for p in folder.glob("**"))
+        ['.', 'sub', 'sub/scan.nii']
+        >>> [p.name for p in folder.glob("*/")]
+        ['sub']
+        ```
+
+        On an object store a `**` lists the subtree in one request.
         """
-        listed = self._listed_glob(
+        return self._glob(
             pattern, case_sensitive, recurse_symlinks, recursive=False
-        )
-        if listed is not None:
-            return listed
-        return engine.invoke(
-            self, BY_NAME["glob"], (pattern,),
-            {
-                "case_sensitive": case_sensitive,
-                "recurse_symlinks": recurse_symlinks,
-            },
         )
 
     def rglob(
@@ -467,38 +480,36 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         case_sensitive: tx.Optional[bool] = None,
         recurse_symlinks: bool = False,
     ) -> tx.Iterator[tx.Self]:
-        """Like `glob`, recursively."""
-        listed = self._listed_glob(
+        """Like `glob`, recursively: `glob("**/" + pattern)`."""
+        return self._glob(
             pattern, case_sensitive, recurse_symlinks, recursive=True
         )
-        if listed is not None:
-            return listed
-        return engine.invoke(
-            self, BY_NAME["rglob"], (pattern,),
-            {
-                "case_sensitive": case_sensitive,
-                "recurse_symlinks": recurse_symlinks,
-            },
-        )
 
-    def _listed_glob(
+    def _glob(
         self,
         pattern: tx.Any,
         case_sensitive: tx.Optional[bool],
         recurse_symlinks: bool,
         *,
         recursive: bool,
-    ) -> tx.Optional[tx.Iterator[tx.Self]]:
-        # Only the plain call: a keyword the driver handles its own way
-        # (UPath warns that it ignores them) goes to the driver.
-        if (
-            not isinstance(pattern, str) or case_sensitive is not None
-            or recurse_symlinks
-        ):
-            return None
-        return _drivers.adapter_for(self._wrapped).listed_glob(
-            self, pattern, recursive=recursive
+    ) -> tx.Iterator[tx.Self]:
+        # The shared glob, over this driver's listing; a driver that cannot
+        # list a directory keeps its own glob.
+        if not callable(getattr(self._wrapped, "iterdir", None)):
+            return engine.invoke(
+                self, BY_NAME["rglob" if recursive else "glob"], (pattern,),
+                {
+                    "case_sensitive": case_sensitive,
+                    "recurse_symlinks": recurse_symlinks,
+                },
+            )
+        requests = _glob.select(
+            self.with_wrapped(self._wrapped), pattern,
+            recursive=recursive, windows=self._windows_patterns(),
+            case_sensitive=case_sensitive, recurse_symlinks=recurse_symlinks,
         )
+        adapter = _drivers.adapter_for(self._wrapped)
+        return _glob.iterate(requests, adapter.glob_tree)
 
     # -- creation ----------------------------------------------------------
     def mkdir(
