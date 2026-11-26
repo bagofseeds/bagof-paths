@@ -257,9 +257,16 @@ def _tree(root: pathlib.Path) -> None:
     (root / "scan.nii").write_bytes(b"0123")
 
 
-def _count_os_stats(monkeypatch: pytest.MonkeyPatch) -> list:
-    """Record every os.stat / os.lstat made from Python code."""
+def _count_os_stats(
+    monkeypatch: pytest.MonkeyPatch, root: pathlib.Path,
+) -> list:
+    """Record every os.stat / os.lstat made on a path under `root`.
+
+    Calls on other paths are not counted: a tracer such as coverage stats
+    its own files while the test runs.
+    """
     calls: list = []
+    prefix = os.fspath(root)
     for name in ("stat", "lstat"):
         original = getattr(os, name)
 
@@ -267,7 +274,10 @@ def _count_os_stats(monkeypatch: pytest.MonkeyPatch) -> list:
             *args: object, _name: str = name, _original: object = original,
             **kwargs: object,
         ) -> object:
-            calls.append(_name)
+            target = args[0] if args else kwargs.get("path")
+            if isinstance(target, (str, bytes, os.PathLike)):
+                if os.fsdecode(os.fspath(target)).startswith(prefix):
+                    calls.append(_name)
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(os, name, counted)
@@ -304,7 +314,7 @@ def test_listed_types_cost_nothing_and_status_one_stat(
     _tree(tmp_path)
     mtime = (tmp_path / "scan.nii").stat().st_mtime
     children = {c.name: c for c in Path(tmp_path).iterdir()}
-    calls = _count_os_stats(monkeypatch)
+    calls = _count_os_stats(monkeypatch, tmp_path)
     for child in children.values():
         info = child.pathinfo
         info.is_dir(), info.is_file(), info.is_symlink()
@@ -324,7 +334,7 @@ def test_unlisted_path_reads_each_view_once(
 ) -> None:
     _tree(tmp_path)
     scan = Path(tmp_path) / "scan.nii"
-    calls = _count_os_stats(monkeypatch)
+    calls = _count_os_stats(monkeypatch, tmp_path)
     info = scan.pathinfo
     assert (info.is_file(), info.exists(), info.size()) == (True, True, 4)
     assert info.mtime() is not None and not info.is_dir()
