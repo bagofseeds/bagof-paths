@@ -640,6 +640,10 @@ def test_cloudpathlib_agrees_with_its_own_where_it_is_pathlib_314s(
         "**", "*/"
     )):
         assert native != expected
+    elif case is False and sys.version_info < (3, 12):
+        # Before 3.12 its selectors are the running pathlib's, which take no
+        # case_sensitive: it is dropped, and its glob matches by case.
+        assert native == _cloud_expected((method, pattern, None))
     else:
         assert native == expected
 

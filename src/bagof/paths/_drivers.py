@@ -65,10 +65,32 @@ def _is_stock_local(wrapped: tx.Any) -> bool:
         # I/O; leave it to its own methods to say so.
         return False
     kind = type(wrapped)
+    shims = _upath_local_shims(kind)
     return all(
-        getattr(kind, name, None) is getattr(pathlib.Path, name)
+        getattr(kind, name, None)
+        in (getattr(pathlib.Path, name), shims.get(name, pathlib.Path))
         for name in ("iterdir", "is_dir", "is_file", "is_symlink", "exists")
     )
+
+
+def _upath_local_shims(kind: type) -> tx.Dict[str, tx.Any]:
+    """The members universal-pathlib's local flavor backports onto `kind`.
+
+    Before 3.13 its local path redefines `is_dir`/`is_file` (and, before
+    3.12, `exists`) only to take a newer signature, then calls pathlib's own:
+    it still lists and classifies the stdlib way. Empty for any other class;
+    universal-pathlib is never imported here.
+    """
+    local = getattr(
+        sys.modules.get("upath.implementations.local"), "LocalPath", None
+    )
+    if not (isinstance(local, type) and issubclass(kind, local)):
+        return {}
+    return {
+        name: getattr(local, name)
+        for name in ("is_dir", "is_file", "exists")
+        if name in vars(local)
+    }
 
 
 def _is_stock(wrapped: tx.Any, base: type, names: tx.Iterable[str]) -> bool:

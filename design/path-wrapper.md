@@ -809,7 +809,7 @@ registry.
   | `**`, `sub/**` | files and directories | directories only | as 3.14 | directories only | 3.14 |
   | `*/`, `**/*/` (trailing `/`) | directories only | 3.8: ignored; 3.12: as 3.14 | as 3.14 | ignored | 3.14 |
   | `a.txt/` | nothing | 3.8: `a.txt` | as 3.14 | `a.txt` | 3.14 |
-  | `case_sensitive=False` | honoured | honoured (3.12+) | ignored, with a warning | honoured | 3.14, every driver |
+  | `case_sensitive=False` | honoured | honoured (3.12+) | ignored, with a warning | honoured (3.12+; before, ignored: it runs the running pathlib's selectors) | 3.14, every driver |
   | `./a.txt`, `sub//x` | normalized | normalized | nothing matches | normalized | 3.14 |
   | `sub/../a.txt` | `sub/../a.txt` | same | nothing (a store has no `..`) | raises | 3.14 locally; see below |
   | `*` on `.hidden` | matches | matches | matches | matches | matches |
