@@ -503,6 +503,19 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
                     "recurse_symlinks": recurse_symlinks,
                 },
             )
+        return self._shared_glob(
+            pattern, case_sensitive, recurse_symlinks, recursive=recursive
+        )
+
+    def _shared_glob(
+        self,
+        pattern: tx.Any,
+        case_sensitive: tx.Optional[bool],
+        recurse_symlinks: bool,
+        *,
+        recursive: bool,
+    ) -> tx.Iterator[tx.Self]:
+        # The shared glob's matches, over this path's own iterdir().
         requests = _glob.select(
             self.with_wrapped(self._wrapped), pattern,
             recursive=recursive, windows=self._windows_patterns(),

@@ -17,6 +17,7 @@ import shutil
 import sys
 
 import pytest
+import typing_extensions as tx
 
 from bagof.paths import (
     AsyncPath,
@@ -773,3 +774,425 @@ def test_cloudpathlib_iterdir_types_cost_no_call() -> None:
     assert scan.pathinfo.is_file() and scan.pathinfo.exists()  # kept
     assert not scan.exists()
     assert not (Path(root) / "nope").pathinfo.exists()
+
+
+# -- the record, and what a store reports -------------------------------------
+def test_a_known_link_is_neither_a_directory_nor_a_file() -> None:
+    from bagof.paths._pathinfo import LSTAT, UNKNOWN, Facts
+
+    facts = Facts()
+    facts.learn(LSTAT, {"exists": True, "symlink": True})
+    assert facts.get(LSTAT, "dir") is False
+    assert facts.get(LSTAT, "file") is False
+    assert facts.get(LSTAT, "exists") is True
+    assert Facts().get(LSTAT, "dir") is UNKNOWN
+
+
+def test_an_entry_that_cannot_be_read_answers_false() -> None:
+    from bagof.paths._pathinfo import LSTAT, Facts
+
+    class _Unreadable:
+        """A listing entry whose type cannot be read any more (its lstat
+        fails), as `os.DirEntry` can on a store without `d_type`."""
+
+        def is_symlink(self) -> bool:
+            raise PermissionError("gone")
+
+        def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+            raise FileNotFoundError("gone")
+
+        def is_file(self, *, follow_symlinks: bool = True) -> bool:
+            raise OSError("gone")
+
+    facts = Facts(entry=_Unreadable(), listed=True)
+    assert [facts.get(LSTAT, k) for k in ("exists", "symlink", "dir")] == [
+        True, False, False,
+    ]
+    facts.freeze()  # copied in, without raising
+    assert facts.get(LSTAT, "file") is False
+
+
+@pytest.mark.parametrize("value, expected", [
+    (1700000000, 1700000000.0),
+    (1700000000.5, 1700000000.5),
+    ("2023-11-14T22:13:20Z", 1700000000.0),
+    ("2023-11-14T22:13:20+00:00", 1700000000.0),
+    ("2023-11-14T22:13:20", 1700000000.0),  # a store's naive time is UTC
+    ("yesterday", None),
+    (True, None),
+    (b"1700000000", None),
+])
+def test_a_store_time_reads_as_a_posix_timestamp(
+    value: object, expected: object,
+) -> None:
+    import datetime
+
+    from bagof.paths._pathinfo import STAT, info_view
+
+    info = {"type": "file", "size": 3, "LastModified": value}
+    assert info_view(info, STAT)["mtime"] == expected
+    aware = datetime.datetime(2023, 11, 14, 22, 13, 20,
+                              tzinfo=datetime.timezone.utc)
+    later = {"type": "file", "mtime": None, "last_modified": aware}
+    assert info_view(later, STAT)["mtime"] == 1700000000.0
+
+
+# -- drivers with links, errors, no stat --------------------------------------
+class _Linky(_Plain):
+    """An unknown driver whose store has symbolic links (no listing)."""
+
+    def __truediv__(self, other: object) -> "_Linky":
+        return _Linky(self._real / other)
+
+    def is_symlink(self) -> bool:
+        self.asked.append("is_symlink")
+        return self._real.is_symlink()
+
+
+@pytest.mark.parametrize(
+    "listed, kind, how, pre", [s for s in _SCENARIOS if s[0] == "unlisted"]
+)
+def test_unknown_driver_with_links_answers_as_pathlib_314_does(
+    tmp_path: pathlib.Path, listed: str, kind: str, how: str, pre: str,
+) -> None:
+    _skip_links(kind)
+    _build(tmp_path, kind)
+    path = Path(_Linky(tmp_path)) / "t"
+    _pre(path.pathinfo, pre)
+    _change(tmp_path, how)
+    assert _bits(path.pathinfo) == _expected(listed, kind, how, pre)
+
+
+class _Remote(os.PathLike):
+    """A remote driver (an s3 URL) over a local tree, synchronous."""
+
+    protocol = "s3"
+    fail: tx.FrozenSet[str] = frozenset()
+
+    def __init__(self, real: object) -> None:
+        self._real = pathlib.Path(real)
+
+    def __fspath__(self) -> str:
+        return "s3://bucket" + self._real.as_posix()
+
+    __str__ = __fspath__
+
+    def __truediv__(self, other: object) -> "_Remote":
+        return type(self)(self._real / other)
+
+    @property
+    def name(self) -> str:
+        return self._real.name
+
+    def _answer(self, name: str) -> object:
+        if name in self.fail:
+            raise PermissionError(name)
+        return getattr(self._real, name)()
+
+    def exists(self) -> bool:
+        return self._answer("exists")
+
+    def is_dir(self) -> bool:
+        return self._answer("is_dir")
+
+    def is_file(self) -> bool:
+        return self._answer("is_file")
+
+    def is_symlink(self) -> bool:
+        return self._answer("is_symlink")
+
+    def stat(self) -> os.stat_result:
+        return self._answer("stat")
+
+
+class _RemoteAsync(_Remote):
+    """The same remote driver, natively async (its I/O are coroutines)."""
+
+    async def exists(self) -> bool:  # type: ignore[override]
+        return self._answer("exists")
+
+    async def is_dir(self) -> bool:  # type: ignore[override]
+        return self._answer("is_dir")
+
+    async def is_file(self) -> bool:  # type: ignore[override]
+        return self._answer("is_file")
+
+    async def is_symlink(self) -> bool:  # type: ignore[override]
+        return self._answer("is_symlink")
+
+    async def stat(self) -> os.stat_result:  # type: ignore[override]
+        return self._answer("stat")
+
+    async def iterdir(self) -> tx.AsyncIterator["_RemoteAsync"]:
+        for child in self._real.iterdir():
+            yield _RemoteAsync(child)
+
+
+@pytest.mark.parametrize(
+    "listed, kind, how, pre", [s for s in _SCENARIOS if s[0] == "unlisted"]
+)
+def test_async_native_driver_answers_as_pathlib_314_does(
+    tmp_path: pathlib.Path, listed: str, kind: str, how: str, pre: str,
+) -> None:
+    # A remote natively-async driver is awaited, member by member.
+    _skip_links(kind)
+    _build(tmp_path, kind)
+    path = AsyncPath(_RemoteAsync(tmp_path)) / "t"
+    assert not path.is_local()
+    info = _Awaited(path.pathinfo)
+    _pre(info, pre)
+    _change(tmp_path, how)
+    assert _bits(info) == _expected(listed, kind, how, pre)
+
+
+def _unreachable(base: type, tmp_path: pathlib.Path) -> object:
+    class _Refusing(base):  # type: ignore[valid-type, misc]
+        fail = frozenset({"is_file", "is_dir", "exists", "stat"})
+
+    (tmp_path / "t").write_bytes(b"1234")
+    return _Refusing(tmp_path / "t")
+
+
+def test_a_path_that_cannot_be_reached_answers_false(
+    tmp_path: pathlib.Path,
+) -> None:
+    # A remote driver's own checks raise; pathinfo answers False, as
+    # pathlib 3.14's info does, and an unreadable stat has no size.
+    path = Path(_unreachable(_Remote, tmp_path))
+    with pytest.raises(PermissionError):
+        path.is_file()
+    assert (path.pathinfo.is_file(), path.pathinfo.is_dir()) == (False, False)
+    assert path.pathinfo.exists() is False
+    assert path.pathinfo.size() is None and path.pathinfo.mtime() is None
+
+
+def test_async_a_path_that_cannot_be_reached_answers_false(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = AsyncPath(_unreachable(_RemoteAsync, tmp_path))
+    info = _Awaited(path.pathinfo)
+    assert (info.is_file(), info.is_dir(), info.exists()) == (
+        False, False, False,
+    )
+    assert info.size() is None and info.mtime() is None
+
+
+class _NoStat(_Remote):
+    """A remote store with types and no `stat`."""
+
+    stat = None  # type: ignore[assignment]
+
+
+class _NoStatAsync(_RemoteAsync):
+    stat = None  # type: ignore[assignment]
+
+
+@pytest.mark.parametrize("front, driver", [
+    (Path, _NoStat), (AsyncPath, _NoStatAsync),
+])
+def test_a_store_without_stat_has_no_size_or_time(
+    tmp_path: pathlib.Path, front: type, driver: type,
+) -> None:
+    (tmp_path / "t").write_bytes(b"1234")
+    path = front(driver(tmp_path / "t"))
+    info = _Awaited(path.pathinfo) if front is AsyncPath else path.pathinfo
+    assert info.size() is None and info.mtime() is None
+    assert info.is_file() and info.exists()
+    assert not info.is_symlink()
+
+
+def test_an_adapter_that_cannot_say_reads_as_not_there(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from bagof.paths import _drivers, register_driver
+
+    monkeypatch.setattr(_drivers, "_REGISTRY", list(_drivers._REGISTRY))
+    monkeypatch.setattr(_drivers, "_CACHE", {})
+    asked = []
+
+    class _Silent(_drivers.GenericAdapter):
+        def query_facts(
+            self, wrapper: object, view: str, key: str, facts: object,
+        ) -> dict:
+            asked.append((view, key))
+            return {}
+
+    class _Mute(_Remote):
+        pass
+
+    register_driver(_Mute, _Silent())
+    (tmp_path / "t").write_bytes(b"1234")
+    info = Path(_Mute(tmp_path / "t")).pathinfo
+    assert (info.is_file(), info.size(), info.exists()) == (False, None, False)
+    assert not info.is_symlink() and not info.is_file(follow_symlinks=False)
+    # Each question asked once; what the query could not say is kept.
+    assert asked == [
+        ("stat", "file"), ("stat", "size"), ("stat", "exists"),
+        ("lstat", "symlink"), ("lstat", "file"),
+    ]
+
+
+# -- the stdlib listing, on every pathlib -------------------------------------
+class _Sys:
+    """`sys`, as an earlier interpreter reports its version."""
+
+    def __init__(self, version: tx.Tuple[int, ...]) -> None:
+        self.version_info = version
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(sys, name)
+
+
+@pytest.mark.parametrize("version, eager", [
+    ((3, 13, 0), True), ((3, 12, 0), False), ((3, 8, 0), False),
+])
+def test_the_stdlib_listing_reads_when_that_pathlib_does(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+    version: tx.Tuple[int, ...], eager: bool,
+) -> None:
+    # pathlib 3.13 reads the directory when iterdir() is called, earlier
+    # ones when the iteration starts; the listing keeps each entry.
+    from bagof.paths import _drivers
+
+    _tree(tmp_path)
+    monkeypatch.setattr(_drivers, "sys", _Sys(version))
+    children = Path(tmp_path).iterdir()
+    (tmp_path / "late.txt").write_bytes(b"")
+    found = {c.name: c for c in children}
+    assert ("late.txt" in found) is not eager
+    calls = _count_os_stats(monkeypatch, tmp_path)
+    assert found["sub"].pathinfo.is_dir()
+    assert found["scan.nii"].pathinfo.is_file()
+    assert not found["sub"].pathinfo.is_symlink()
+    assert calls == []  # typed by the listing
+    assert found["scan.nii"].pathinfo.size() == 4
+    shutil.rmtree(tmp_path / "sub")
+    with pytest.raises(FileNotFoundError):
+        list(Path(tmp_path / "sub").iterdir())
+
+
+class _OwnInfo(type(pathlib.Path())):  # type: ignore[misc]
+    """A stdlib path subclass that defines its own `info`."""
+
+    @property
+    def info(self) -> object:
+        raise AssertionError("not read")
+
+
+def test_a_path_subclass_with_its_own_info_is_listed_by_name(
+    tmp_path: pathlib.Path,
+) -> None:
+    _tree(tmp_path)
+    children = {c.name: c for c in Path(_OwnInfo(tmp_path)).iterdir()}
+    assert sorted(children) == ["scan.nii", "sub"]
+    if sys.version_info >= (3, 14):
+        # Its `info` is its own, so the listing is its own iterdir().
+        assert all(c._listing_facts() is None for c in children.values())
+    assert children["sub"].pathinfo.is_dir()
+    assert children["scan.nii"].pathinfo.size() == 4
+
+
+# -- universal-pathlib over the local disk ------------------------------------
+def _local_upath(url: bool) -> object:
+    UPath = pytest.importorskip("upath").UPath
+    return lambda root: UPath(root.as_uri() if url else os.fspath(root))
+
+
+@pytest.mark.parametrize("url", [False, True], ids=["posix", "file-url"])
+@pytest.mark.parametrize("listed, kind, how, pre", _SCENARIOS)
+def test_local_upath_answers_as_pathlib_314_does(
+    tmp_path: pathlib.Path, url: bool,
+    listed: str, kind: str, how: str, pre: str,
+) -> None:
+    make = _local_upath(url)
+    _skip_links(kind)
+    _build(tmp_path, kind)
+    root = Path(make(tmp_path))
+    if listed == "listed":
+        (path,) = [c for c in root.iterdir() if c.name == "t"]
+        # A file URL lists with its own iterdir, which keeps no types: its
+        # children answer as paths that were not listed.
+        assert (path._listing_facts() is None) is url
+        if url:
+            listed = "unlisted"
+    else:
+        path = root / "t"
+    _pre(path.pathinfo, pre)
+    _change(tmp_path, how)
+    assert _bits(path.pathinfo) == _expected(listed, kind, how, pre)
+
+
+@pytest.mark.parametrize("url", [False, True], ids=["posix", "file-url"])
+def test_local_upath_walk_is_the_stdlib_walk(
+    tmp_path: pathlib.Path, url: bool,
+) -> None:
+    make = _local_upath(url)
+    _tree(tmp_path)
+    for top_down in (True, False):
+        ours = [
+            (os.fspath(pathlib.Path(str(top.path))), sorted(d), sorted(f))
+            for top, d, f in Path(make(tmp_path)).walk(top_down=top_down)
+        ]
+        expected = [
+            (top, sorted(d), sorted(f))
+            for top, d, f in os.walk(tmp_path, topdown=top_down)
+        ]
+        assert ours == expected
+
+
+def test_local_upath_walk_without_a_native_walk(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # pathlib before 3.12 has no walk: synthesized from one listing per
+    # directory, whose directories carry what it said.
+    UPath = pytest.importorskip("upath").UPath
+    local = type(UPath(os.fspath(tmp_path)))
+    monkeypatch.setattr(local, "walk", None)
+
+    _tree(tmp_path)
+    rows = list(Path(UPath(os.fspath(tmp_path))).walk())
+    assert [(str(t.path), sorted(d), sorted(f)) for t, d, f in rows] == [
+        (os.fspath(tmp_path), ["sub"], ["scan.nii"]),
+        (os.fspath(tmp_path / "sub"), [], ["inner.txt"]),
+    ]
+    assert rows[1][0]._listing_facts() is not None
+    assert type(rows[1][0].wrapped) is local
+
+
+def test_upath_info_as_a_read_only_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A store whose info() is a mapping but not a dict is asked through
+    # the path's own status members instead.
+    import types
+
+    memory = pytest.importorskip("fsspec.implementations.memory")
+    base = _memory_tree("memory://bagofpaths-info-mapping/root")
+    original = memory.MemoryFileSystem.info
+
+    def info(self: object, path: str, **kwargs: object) -> object:
+        return types.MappingProxyType(original(self, path, **kwargs))
+
+    monkeypatch.setattr(memory.MemoryFileSystem, "info", info)
+    found = _ask_everything([Path(base) / "scan.nii", Path(base) / "sub"])
+    assert found["scan.nii"] == (False, True, True, False, 4, True)
+    # A directory's time is what the driver's own stat() reports.
+    assert found["sub"][:5] == (True, False, True, False, None)
+    assert not (Path(base) / "nope").pathinfo.exists()
+
+
+def test_async_native_driver_reads_size_and_time_from_stat(
+    tmp_path: pathlib.Path,
+) -> None:
+    (tmp_path / "t").write_bytes(b"1234")
+    info = _Awaited(AsyncPath(_RemoteAsync(tmp_path / "t")).pathinfo)
+    assert info.size() == 4
+    assert info.mtime() == os.stat(tmp_path / "t").st_mtime
+    assert info.is_file() and not info.is_dir()
+    assert _Awaited(AsyncPath(_RemoteAsync(tmp_path)).pathinfo).size() is None
+
+
+def test_pathinfo_repr_names_its_path(tmp_path: pathlib.Path) -> None:
+    path, apath = Path(tmp_path), AsyncPath(tmp_path)
+    assert repr(path.pathinfo) == f"<PathInfo of {path!r}>"
+    assert repr(apath.pathinfo) == f"<AsyncPathInfo of {apath!r}>"

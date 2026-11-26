@@ -840,3 +840,165 @@ def test_upath_a_file_and_a_directory_of_one_name_are_one_child() -> None:
         names = _rel(found, root)
         assert names == (["x", "x/y"] if method == "rglob" else ["x"])
         assert next(p for p in found if p.name == "x").pathinfo.is_dir()
+
+
+# -- universal-pathlib over the local disk ------------------------------------
+def _local_upath(root: pathlib.Path, url: bool) -> object:
+    UPath = pytest.importorskip("upath").UPath
+    return UPath(root.as_uri() if url else os.fspath(root))
+
+
+@pytest.mark.parametrize("url", [False, True], ids=["posix", "file-url"])
+@pytest.mark.parametrize("method, pattern, case", _CASES)
+def test_local_upath_glob_is_pathlib_314s(
+    tmp_path: pathlib.Path, url: bool, method: str, pattern: str,
+    case: object,
+) -> None:
+    # A local store is walked one directory at a time, as pathlib walks it.
+    root = _local_upath(_local_tree(tmp_path), url)
+    kwargs = _kwargs(case, "case_sensitive")
+    got = _rel(getattr(Path(root), method)(pattern, **kwargs), root)
+    assert got == _GLOB_314[method, pattern, case]
+
+
+@pytest.mark.skipif(not _HAS_LINKS, reason="no symbolic links here")
+@pytest.mark.parametrize("url", [False, True], ids=["posix", "file-url"])
+@pytest.mark.parametrize("method, pattern, recurse", _LINK_CASES)
+def test_local_upath_links_as_pathlib_314(
+    tmp_path: pathlib.Path, url: bool, method: str, pattern: str,
+    recurse: bool,
+) -> None:
+    root = _local_upath(_link_tree(tmp_path), url)
+    got = _rel(
+        getattr(Path(root), method)(pattern, recurse_symlinks=recurse), root
+    )
+    assert got == _LINKS_314[method, pattern, recurse]
+
+
+# -- a store whose recursive listing cannot help ------------------------------
+def _find_that(how: str) -> object:
+    memory = pytest.importorskip("fsspec.implementations.memory")
+    original = memory.MemoryFileSystem.find
+
+    def find(
+        self: object, path: str, *args: object, **kwargs: object
+    ) -> object:
+        if how == "fails":
+            raise PermissionError(path)
+        found = original(self, path, *args, **kwargs)
+        if how == "ignores-detail":
+            return sorted(found)
+        found = dict(found)  # with "." and ".." entries, as some stores do
+        for name in (".", ".."):
+            found[path.rstrip("/") + "/sub/" + name] = {
+                "name": path.rstrip("/") + "/sub/" + name,
+                "type": "directory", "size": 0,
+            }
+        return found
+
+    return find
+
+
+@pytest.mark.parametrize("how", ["fails", "ignores-detail", "dot-entries"])
+@pytest.mark.parametrize("pattern", ["**", "**/*.txt", "sub/**", "**/*/"])
+def test_upath_glob_without_a_useful_recursive_listing(
+    monkeypatch: pytest.MonkeyPatch, how: str, pattern: str,
+) -> None:
+    # Walked one directory at a time instead (or with the extra names
+    # dropped): the same matches.
+    memory = pytest.importorskip("fsspec.implementations.memory")
+    root = _memory_tree(f"find-{how}")
+    monkeypatch.setattr(memory.MemoryFileSystem, "find", _find_that(how))
+    got = _rel(Path(root).glob(pattern), root)
+    assert got == _store_expected(("glob", pattern, None))
+
+
+def test_upath_listing_drops_dot_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A store that lists "." and ".." (as FTP does): not children, as
+    # UPath's own iterdir has it.
+    memory = pytest.importorskip("fsspec.implementations.memory")
+    root = _memory_tree("dot-ls")
+    original = memory.MemoryFileSystem.ls
+
+    def ls(
+        self: object, path: str, detail: bool = True, **kw: object
+    ) -> object:
+        found = original(self, path, detail=detail, **kw)
+        dots = [path.rstrip("/") + "/" + name for name in (".", "..")]
+        if detail:
+            dots = [{"name": n, "type": "directory", "size": 0} for n in dots]
+        return dots + list(found)
+
+    monkeypatch.setattr(memory.MemoryFileSystem, "ls", ls)
+    ours = sorted(c.name for c in Path(root).iterdir())
+    assert ours == sorted(c.name for c in root.iterdir())
+    assert "." not in ours and ".." not in ours
+    assert _rel(Path(root).glob("*"), root) == _store_expected(
+        ("glob", "*", None)
+    )
+
+
+# -- cloudpathlib without its lazy walk ---------------------------------------
+@pytest.mark.parametrize("walk", ["eager", "none"])
+def test_cloudpathlib_without_a_lazy_walk(
+    monkeypatch: pytest.MonkeyPatch, walk: str,
+) -> None:
+    # An older cloudpathlib (a walk with no `lazy`, or none at all) lists
+    # each directory with its iterdir: the same matches, unlisted children.
+    local = pytest.importorskip("cloudpathlib.local")
+    root = _cloud_tree(f"walk-{walk}")
+    cls = type(root)
+    original = cls.walk
+
+    def eager(self: object, top_down: bool = True) -> object:
+        return original(self, top_down=top_down)
+
+    monkeypatch.setattr(cls, "walk", eager if walk == "eager" else None)
+    assert isinstance(root.client, local.LocalS3Client)
+    children = list(Path(root).iterdir())
+    assert all(c._listing_facts() is None for c in children)
+    assert sorted(c.name for c in children) == sorted(
+        c.name for c in root.iterdir()
+    )
+    for pattern in ("**/*.txt", "*"):
+        got = _rel(Path(root).glob(pattern), root)
+        assert got == _cloud_expected(("glob", pattern, None))
+    sub = next(c for c in children if c.name == "sub")
+    assert sub.pathinfo.is_dir() and not sub.pathinfo.is_file()
+
+
+# -- one name, a file and a directory, in one recursive listing ---------------
+def test_a_recursive_listing_with_a_file_named_as_a_directory() -> None:
+    # A listing that reports `x` as a file, and `x/y` below it: `x` is one
+    # child, a directory, as a directory listing has it.
+    from bagof.paths._glob import tree_from
+    from bagof.paths._pathinfo import typed_facts
+
+    base = Path("/store")
+    x = base._listed(base.wrapped / "x", typed_facts(False))
+    y = base._listed(base.wrapped / "x" / "y", typed_facts(False))
+    tree = tree_from(
+        "/store", str,
+        [("/store", "/store/x", x), ("/store/x", "/store/x/y", y)],
+    )
+    (child,) = tree.scan(base)
+    assert child == x and child.pathinfo.is_dir()
+    assert not child.pathinfo.is_file()
+    assert tree.scan(child) == [y]
+
+
+def test_a_driver_that_names_iterdir_without_one_cannot_glob(
+    tmp_path: pathlib.Path,
+) -> None:
+    # `iterdir` is there but not callable: the shared glob asks it to list,
+    # which says so, rather than delegating to itself again.
+    class _Disabled(_GlobOnly):
+        glob = None  # type: ignore[assignment]
+        iterdir = None
+
+    path = Path(_Disabled(_local_tree(tmp_path)))
+    for method in ("glob", "rglob"):
+        with pytest.raises(UnsupportedPathOperation, match="iterdir"):
+            list(getattr(path, method)("*.txt"))

@@ -1075,3 +1075,121 @@ def test_pathinfo_stays_on_the_listed_child() -> None:
     is_dir, leaked = _run(go())
     assert is_dir is True
     assert leaked == [None] * 6
+
+
+# -- stores whose listings say less (#64) -------------------------------------
+async def _small_tree(root: str) -> AsyncPath:
+    base = AsyncPath(root)
+    await (base / "sub" / "deeper" / "x.nii").write_bytes(b"xx")
+    await (base / "sub" / "inner.txt").write_bytes(b"in")
+    await (base / "scan.nii").write_bytes(b"0123")
+    return base
+
+
+@pytest.mark.parametrize("how", ["names-only", "lists-itself"])
+def test_iterdir_over_a_listing_that_says_less(
+    monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    original = MemoryFileSystem.ls
+
+    def ls(
+        self: object, path: str, detail: bool = True, **kw: object
+    ) -> object:
+        if how == "names-only":  # a backend that ignores detail
+            return original(self, path, detail=False, **kw)
+        found = original(self, path, detail=detail, **kw)
+        # an object store can list the directory's own marker key
+        return [{"name": path.rstrip("/") + "/", "type": "directory",
+                 "size": 0}] + list(found)
+
+    base = _run(_small_tree(f"memasync://b/less-{how}"))
+    # Patched before the next event loop builds its filesystem.
+    monkeypatch.setattr(MemoryFileSystem, "ls", ls)
+
+    async def go() -> object:
+        children = {c.name: c async for c in base.iterdir()}
+        return {
+            name: (
+                c.wrapped._snapshot is not None,
+                await c.pathinfo.is_dir(), await c.pathinfo.is_file(),
+                await c.pathinfo.size(),
+            )
+            for name, c in children.items()
+        }
+
+    listed = how != "names-only"
+    assert _run(go()) == {
+        "sub": (listed, True, False, None),
+        "scan.nii": (listed, False, True, 4),
+    }
+
+
+@pytest.mark.parametrize("how", ["fails", "ignores-detail"])
+def test_recursive_glob_without_a_useful_find(
+    monkeypatch: pytest.MonkeyPatch, how: str,
+) -> None:
+    # Walked one listing per directory instead: the same matches.
+    original = MemoryFileSystem.find
+    asked = []
+
+    def find(self: object, path: str, *args: object, **kw: object) -> object:
+        asked.append(path)
+        if how == "fails":
+            raise PermissionError(path)
+        return sorted(original(self, path, *args, **kw))
+
+    base = _run(_small_tree(f"memasync://b/find-{how}"))
+    monkeypatch.setattr(MemoryFileSystem, "find", find)
+
+    async def go() -> object:
+        found = [p async for p in base.rglob("*.nii")]
+        return sorted(str(p) for p in found), [
+            await p.pathinfo.is_file() for p in found
+        ]
+
+    names, files = _run(go())
+    assert names == [
+        f"memasync://b/find-{how}/scan.nii",
+        f"memasync://b/find-{how}/sub/deeper/x.nii",
+    ]
+    assert files == [True, True]
+    assert asked == [f"/b/find-{how}"]  # asked once, then walked
+
+
+class _MemSyncWalkFS(_MemAsyncFS):
+    """A backend whose `_walk` is a coroutine returning a synchronous
+    generator (as fsspec's async wrapper once made it)."""
+
+    protocol = "memsyncwalk"
+
+    async def _walk(self, path: str, **kwargs: object) -> object:
+        return self.sync_fs.walk(path, **kwargs)
+
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        text = path.replace("memsyncwalk://", "memory://")
+        return MemoryFileSystem._strip_protocol(text)
+
+
+def test_walk_over_a_synchronous_walk() -> None:
+    fsspec.register_implementation("memsyncwalk", _MemSyncWalkFS, clobber=True)
+
+    async def go() -> object:
+        base = await _small_tree("memsyncwalk://b/syncwalk")
+        assert isinstance(base.wrapped, AsyncFSPath)
+        rows = [row async for row in base.walk()]
+        return {
+            top.name: (
+                sorted(dirs), sorted(files), await top.pathinfo.is_dir()
+            )
+            for top, dirs, files in rows
+        }, [top.wrapped._snapshot is not None for top, _, _ in rows]
+
+    rows, listed = _run(go())
+    assert rows == {
+        "syncwalk": (["sub"], ["scan.nii"], True),
+        "sub": (["deeper"], ["inner.txt"], True),
+        "deeper": ([], ["x.nii"], True),
+    }
+    # The start was not listed; each directory below holds its listing.
+    assert listed == [False, True, True]

@@ -123,11 +123,9 @@ class Facts:
     def learn(self, view: str, found: tx.Mapping[str, tx.Any]) -> None:
         """Keep new answers; an answer already known is never replaced.
 
-        A listing's own entry answers the `LSTAT` view, so a later query
-        never overrides what the listing said.
+        A listing's own entry answers every `LSTAT` question, so that view
+        is never queried while it is held.
         """
-        if view == LSTAT and self._entry is not None:
-            return
         known = self._views[view]
         for key, value in found.items():
             known.setdefault(key, value)
