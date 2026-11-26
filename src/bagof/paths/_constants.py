@@ -32,11 +32,12 @@ ADAPTER_MEMBERS = frozenset(
 )
 
 # Members computed by the wrapper itself, delegated to no driver: matching (see
-# _match.py), without_query, is_local, and the local copies (_local_copy.py;
-# local_copy is on Path/AsyncPath only, so supports() checks the wrapper).
+# _match.py), without_query, is_local, the local copies (_local_copy.py), and
+# pathinfo (_pathinfo.py), the same object on every driver. local_copy and
+# pathinfo are on Path/AsyncPath only, so supports() checks the wrapper class.
 COMPUTED_MEMBERS = frozenset({
     "match", "full_match", "without_query", "is_local",
-    "local_copy", "local_stage",
+    "local_copy", "local_stage", "pathinfo",
 })
 
 # Members the I/O front-ends (Path, AsyncPath) build on top of the others,

@@ -14,6 +14,7 @@ from ._errors import (
     UnsupportedPathOperation,
 )
 from ._path import Path
+from ._pathinfo import AsyncPathInfo, PathInfo
 from ._protocols import (
     ProtocolTraits,
     register_protocol,
@@ -24,11 +25,13 @@ from ._staged import AsyncStage, Stage
 
 __all__ = [
     "AsyncPath",
+    "AsyncPathInfo",
     "AsyncStage",
     "CommitError",
     "NoDriverError",
     "NoLocalPathError",
     "Path",
+    "PathInfo",
     "ProtocolTraits",
     "PurePath",
     "Stage",

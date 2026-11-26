@@ -27,10 +27,20 @@ import inspect
 import os
 import pathlib
 import shutil
+import sys
 
 import typing_extensions as tx
 
 from ._errors import UnsupportedPathOperation
+from ._pathinfo import (
+    MISSING,
+    UNKNOWN,
+    Facts,
+    ask,
+    info_facts,
+    listed_facts,
+    stat_facts,
+)
 
 
 def _accepts(func: tx.Any, name: str) -> bool:
@@ -41,36 +51,6 @@ def _accepts(func: tx.Any, name: str) -> bool:
         return False
 
 
-class ListedType:
-    """A child's type as an fsspec listing reported it (an info dict).
-
-    The same shape as `os.DirEntry.is_dir`, so a walk reads either one the
-    same way. A point-in-time answer: the listing's, not a fresh query.
-    """
-
-    __slots__ = ("_dir",)
-
-    def __init__(self, info: tx.Mapping[str, tx.Any]) -> None:
-        self._dir = info.get("type") == "directory"
-
-    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
-        return self._dir
-
-    @classmethod
-    def of(cls, info: tx.Any) -> tx.Optional[ListedType]:
-        """The type in a listing entry, or None where it does not say.
-
-        A listing that ignored `detail` gives no type. A symlink's listed
-        type is the link's own (fsspec's local listing calls a link to a
-        directory "other"), so a symlink is asked, not trusted.
-        """
-        if not isinstance(info, dict) or "type" not in info:
-            return None
-        if info.get("islink"):
-            return None
-        return cls(info)
-
-
 def _is_stock_local(wrapped: tx.Any) -> bool:
     """Whether `wrapped` is a stdlib local path listed the stdlib way.
 
@@ -79,11 +59,29 @@ def _is_stock_local(wrapped: tx.Any) -> bool:
     """
     if not isinstance(wrapped, pathlib.Path):
         return False
+    if getattr(wrapped, "_closed", False):  # pragma: no cover - 3.8 only
+        # A pathlib path closed by its (deprecated) context manager refuses
+        # I/O; leave it to its own methods to say so.
+        return False
     kind = type(wrapped)
     return all(
         getattr(kind, name, None) is getattr(pathlib.Path, name)
-        for name in ("iterdir", "is_dir", "is_symlink")
+        for name in ("iterdir", "is_dir", "is_file", "is_symlink", "exists")
     )
+
+
+def _is_stock(wrapped: tx.Any, base: type, names: tx.Iterable[str]) -> bool:
+    """Whether `wrapped`'s class keeps `base`'s own `names`."""
+    kind = type(wrapped)
+    return all(
+        getattr(kind, name, None) is getattr(base, name, None)
+        for name in names
+    )
+
+
+def _is_listed_dir(facts: tx.Optional[Facts]) -> bool:
+    """Whether a listed child is (or may be) a directory."""
+    return facts is None or facts.get("dir") is not False
 
 
 def _lists_with_fsspec(wrapped: tx.Any) -> bool:
@@ -208,20 +206,91 @@ class GenericAdapter:
     ) -> tx.List[tx.Any]:
         """The children of `wrapper`, in one listing.
 
-        A child carries the listing's own type answer where the driver's
-        listing gives one (`os.scandir` for a stdlib local path); otherwise
-        it is a plain `iterdir()` child, classified by asking it. A known
-        directory (one a parent listing reported) skips any check that the
-        path is a directory.
+        A child carries the listing's own answers (its `pathinfo` record)
+        where the driver's listing gives them (`os.scandir` for a stdlib
+        local path); otherwise it is a plain `iterdir()` child, classified
+        by asking it. A known directory (one a parent listing reported)
+        skips any check that the path is a directory.
         """
         wrapped = wrapper._wrapped
         if _is_stock_local(wrapped):
             with os.scandir(wrapped) as scan:
                 return [
-                    wrapper._listed(wrapped / entry.name, entry)
+                    wrapper._listed(
+                        wrapped / entry.name, Facts(entry=entry, listed=True)
+                    )
                     for entry in scan
                 ]
         return list(wrapper.iterdir())
+
+    # -- pathinfo: listings that keep their detail, and the store's answers
+    def listed_children(
+        self, wrapper: tx.Any
+    ) -> tx.Optional[tx.Iterator[tx.Any]]:
+        """`iterdir()` children with the listing's answers, or None.
+
+        None leaves `iterdir` to the driver: its listing says nothing more
+        than the names. A stdlib local path is listed with `os.scandir`
+        (before 3.14, whose pathlib does so itself and keeps each entry as
+        the child's `info`), at the moment and with the errors its own
+        `iterdir` has.
+        """
+        wrapped = wrapper._wrapped
+        if not _is_stock_local(wrapped):
+            return None
+        if sys.version_info >= (3, 14):
+            if type(wrapped).info is not pathlib.Path.info:
+                return None
+            # pathlib's own children, untouched (their `info` included);
+            # reading `info` on a listed child returns its directory entry.
+            return (
+                wrapper._listed(child, Facts(entry=child.info, listed=True))
+                for child in wrapped.iterdir()
+            )
+
+        def child(entry: os.DirEntry) -> tx.Any:
+            return wrapper._listed(
+                wrapped / entry.name, Facts(entry=entry, listed=True)
+            )
+
+        if sys.version_info >= (3, 13):
+            # pathlib 3.13 reads the directory when iterdir() is called.
+            with os.scandir(str(wrapped)) as scan:
+                entries = list(scan)
+            return (child(entry) for entry in entries)
+
+        def lazily() -> tx.Iterator[tx.Any]:
+            # Earlier pathlib reads it when the iteration starts.
+            with os.scandir(wrapped) as scan:
+                entries = list(scan)
+            for entry in entries:
+                yield child(entry)
+
+        return lazily()
+
+    def listed_glob(
+        self, wrapper: tx.Any, pattern: str, *, recursive: bool
+    ) -> tx.Optional[tx.Iterator[tx.Any]]:
+        """`glob()`/`rglob()` matches with the listing's answers, or None.
+
+        None leaves the match to the driver. Called only for a string
+        pattern and the default keywords.
+        """
+        return None
+
+    def query_facts(
+        self, wrapper: tx.Any, key: str, facts: Facts
+    ) -> tx.Dict[str, tx.Any]:
+        """What the store says about `wrapper` (a synchronous `Path`).
+
+        Returns at least the fact `key`, and every other one the same call
+        gave. A stdlib local path answers everything from `os.lstat` (and
+        `os.stat` for a link); any other driver is asked through the path's
+        own status members.
+        """
+        if _is_stock_local(wrapper._wrapped):
+            return stat_facts(wrapper._wrapped)
+        return ask(wrapper, key, facts)
 
     def _walk_fallback(
         self,
@@ -242,49 +311,68 @@ class GenericAdapter:
             return
         dirnames: tx.List[str] = []
         filenames: tx.List[str] = []
-        listed_dirs = set()
+        listed_dirs: tx.Dict[str, Facts] = {}
         for entry in entries:
-            snapshot = getattr(entry, "_snapshot", None)
+            facts = entry._listing_facts()
             try:
-                if snapshot is not None:
+                is_dir = None
+                if facts is not None:
                     # The listing's answer: no query per child.
-                    is_dir = snapshot.is_dir(follow_symlinks=follow_symlinks)
-                else:
+                    is_dir = _listed_is_dir(facts, follow_symlinks)
+                if is_dir is None:
                     is_dir = entry.is_dir()
+                    # Mirror native walk: with follow_symlinks=False a
+                    # symlinked directory is classified as a file
+                    # (is_dir(follow_symlinks=False) is what pathlib uses),
+                    # which is also what stops symlink cycles.
+                    if is_dir and not follow_symlinks and entry.is_symlink():
+                        is_dir = False
             except OSError as error:
                 if on_error is not None:
                     on_error(error)
                 continue
-            # Mirror native walk: with follow_symlinks=False a symlinked
-            # directory is classified as a file (is_dir(follow_symlinks=False)
-            # is what pathlib uses), which is also what stops symlink cycles.
-            if (
-                snapshot is None and is_dir and not follow_symlinks
-                and entry.is_symlink()
-            ):
-                is_dir = False
             # The store's own names, as a native walk reports them, so that
             # entries whose names differ only after a "?" stay apart.
             name = entry._store_name()
             (dirnames if is_dir else filenames).append(name)
-            if is_dir and snapshot is not None:
-                listed_dirs.add(name)
+            if is_dir and facts is not None:
+                listed_dirs[name] = facts
 
         if top_down:
             yield wrapper, dirnames, filenames
         # Re-reads dirnames after the yield, so caller pruning is honored.
         # Joined through the driver: a directory whose key holds a "?" is
-        # entered at that key, not at the key without its query.
+        # entered at that key, not at the key without its query. A listed
+        # directory carries what its listing said.
         for name in dirnames:
+            facts = listed_dirs.get(name)
+            child = wrapper._wrapped / name
             yield from self._walk_fallback(
-                wrapper.with_wrapped(wrapper._wrapped / name),
+                wrapper._listed(child, facts) if facts is not None
+                else wrapper.with_wrapped(child),
                 top_down=top_down,
                 on_error=on_error,
                 follow_symlinks=follow_symlinks,
-                known_dir=name in listed_dirs,
+                known_dir=facts is not None,
             )
         if not top_down:
             yield wrapper, dirnames, filenames
+
+
+def _listed_is_dir(facts: Facts, follow_symlinks: bool) -> tx.Optional[bool]:
+    """Whether a listed child is a directory, by the listing alone.
+
+    None where the listing does not say (a symbolic link it reports as the
+    link, when the walk follows links).
+    """
+    if not follow_symlinks:
+        link = facts.get("symlink")
+        if link is True:
+            return False
+        if link is UNKNOWN:
+            return None
+    value = facts.get("dir")
+    return None if value is UNKNOWN else value
 
 
 class UPathAdapter(GenericAdapter):
@@ -346,7 +434,7 @@ class UPathAdapter(GenericAdapter):
             # As UPath's iterdir reports a missing directory.
             raise NotADirectoryError(str(wrapped)) from None
         for info in listing:
-            snapshot = ListedType.of(info)
+            facts = listed_facts(info)
             name = info.get("name", "") if isinstance(info, dict) else info
             name = _drop_suffix(name, sep)
             if name == base_name:
@@ -356,11 +444,9 @@ class UPathAdapter(GenericAdapter):
                 continue
             # A file and a directory can share a name on an object store;
             # one child, a directory if either is (as isdir() answers).
-            if name in found and (
-                found[name] is None or found[name].is_dir()
-            ):
+            if name in found and _is_listed_dir(found[name]):
                 continue
-            found[name] = snapshot
+            found[name] = facts
         if not found and not known_dir and not fs.isdir(base_path):
             # An empty listing is an empty directory, or no directory at
             # all; ask again without a cached listing, as UPath does.
@@ -372,10 +458,128 @@ class UPathAdapter(GenericAdapter):
             wrapper._listed(
                 rebuild(base_path, name) if callable(rebuild)
                 else base / name,
-                snapshot,
+                facts,
             )
-            for name, snapshot in found.items()
+            for name, facts in found.items()
         ]
+
+    def listed_children(
+        self, wrapper: tx.Any
+    ) -> tx.Optional[tx.Iterator[tx.Any]]:
+        wrapped = wrapper._wrapped
+        if not _lists_with_fsspec(wrapped):
+            return super().listed_children(wrapper)
+        if not _is_stock(wrapped, _upath_class(), ("iterdir",)):
+            # A flavor with its own iterdir (http, a local file URL, ...)
+            # lists its own way.
+            return None
+
+        def lazily() -> tx.Iterator[tx.Any]:
+            # UPath's iterdir is a generator: it lists when iterated.
+            yield from self._listing(wrapper, known_dir=False)
+
+        return lazily()
+
+    def listed_glob(
+        self, wrapper: tx.Any, pattern: str, *, recursive: bool
+    ) -> tx.Optional[tx.Iterator[tx.Any]]:
+        # UPath's glob is one fs.glob(), which lists with detail and keeps
+        # only the names; asking for the detail costs nothing more. The
+        # match is UPath's own, step for step, so the paths are the same.
+        wrapped = wrapper._wrapped
+        upath = _upath_class()
+        if not _lists_with_fsspec(wrapped) or not _is_stock(
+            wrapped, upath, ("glob", "rglob", "_fs_glob", "joinpath")
+        ):
+            return None
+        if getattr(wrapped, "_relative_base", None) is not None:
+            return None  # a relative UPath globs from its absolute form
+        if recursive and not _fsspec_glob_works():
+            return None  # UPath works around an old fsspec's "**"
+        sep = getattr(getattr(wrapped, "parser", None), "sep", None)
+        if not isinstance(sep, str):
+            return None
+        return self._glob(wrapper, pattern, recursive, sep)
+
+    def _glob(
+        self, wrapper: tx.Any, pattern: str, recursive: bool, sep: str
+    ) -> tx.Iterator[tx.Any]:
+        wrapped = wrapper._wrapped
+        dirs_only = pattern.endswith(sep)
+        if recursive:
+            path_pattern = wrapped.joinpath("**", pattern).path
+        else:
+            path_pattern = wrapped.joinpath(pattern).path
+        base = wrapped.path
+        if dirs_only:
+            # Filtered by type, not by a trailing separator, as UPath does.
+            path_pattern = path_pattern.rstrip(sep)
+        found = wrapped.fs.glob(path_pattern, detail=True)
+        if not isinstance(found, dict):  # a backend that ignores detail
+            found = {name: None for name in found}
+        seen = set()
+        for name, info in found.items():
+            if dirs_only:
+                if not isinstance(info, dict) or info.get("type") != (
+                    "directory"
+                ):
+                    continue
+                name = name.rstrip(sep)
+                if name in seen:
+                    continue
+                seen.add(name)
+            name = _drop_prefix(_drop_prefix(name, base), sep)
+            yield wrapper._listed(wrapped.joinpath(name), listed_facts(info))
+
+    def query_facts(
+        self, wrapper: tx.Any, key: str, facts: Facts
+    ) -> tx.Dict[str, tx.Any]:
+        # One fs.info() answers every question (UPath's own is_dir, is_file
+        # and exists each make that call).
+        wrapped = wrapper._wrapped
+        if not _lists_with_fsspec(wrapped):
+            return super().query_facts(wrapper, key, facts)
+        try:
+            info = wrapped.fs.info(wrapped.path)
+        except (OSError, ValueError):
+            return dict(MISSING)
+        found = info_facts(info) if isinstance(info, dict) else {}
+        if key not in found:
+            # A symbolic link: what it leads to is asked.
+            found.update(ask(wrapper, key, Facts(found)))
+        return found
+
+
+def _upath_class() -> type:
+    from upath import UPath
+
+    return UPath
+
+
+_GLOB_WORKS: tx.List[bool] = []
+
+
+def _fsspec_glob_works() -> bool:
+    """Whether fsspec's glob matches "**" across directories.
+
+    The check universal-pathlib makes before its rglob trusts a single
+    fs.glob(); an older fsspec needs its two-pattern workaround, which is
+    left to UPath.
+    """
+    if not _GLOB_WORKS:
+        from fsspec.implementations.memory import MemoryFileSystem
+
+        probe = type(
+            "_Probe", (MemoryFileSystem,), {"store": {}, "pseudo_dirs": [""]}
+        )()
+        probe.touch("a.txt")
+        probe.touch("f/b.txt")
+        _GLOB_WORKS.append(len(probe.glob("**/*.txt")) == 2)
+    return _GLOB_WORKS[0]
+
+
+def _drop_prefix(text: str, prefix: str) -> str:
+    return text[len(prefix):] if prefix and text.startswith(prefix) else text
 
 
 def _drop_suffix(text: str, suffix: str) -> str:

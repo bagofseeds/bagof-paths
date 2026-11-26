@@ -934,7 +934,7 @@ def test_iterdir_snapshot_stays_on_the_listed_child() -> None:
     async def go() -> object:
         await AsyncPath("memasync://b/snap/sub/f.txt").write_bytes(b"x")
         (child,) = [c async for c in AsyncPath("memasync://b/snap").iterdir()]
-        listed = child.wrapped._snapshot.is_dir()
+        listed = child.wrapped._snapshot.get("dir")
         derived = [
             child / "f.txt", child.parent, child.with_name("other"),
             child.joinpath("x"),
@@ -948,3 +948,108 @@ def test_iterdir_snapshot_stays_on_the_listed_child() -> None:
     assert leaked == [None, None, None, None]
     # The public status members ask the store, not the listing.
     assert (is_dir, exists) == (False, False)
+
+
+# -- pathinfo on the native async driver (#64) --------------------------------
+def _count_async_calls(monkeypatch: pytest.MonkeyPatch) -> dict:
+    counted = ("ls", "isdir", "isfile", "info", "exists", "glob", "find")
+    counts = dict.fromkeys(counted, 0)
+    for name in counted:
+        original = getattr(MemoryFileSystem, name)
+
+        def count(
+            self: object, *args: object, _name: str = name,
+            _original: object = original, **kwargs: object,
+        ) -> object:
+            counts[_name] += 1
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(MemoryFileSystem, name, count)
+    return counts
+
+
+async def _build_info_tree() -> AsyncPath:
+    base = AsyncPath("memasync://b/info")
+    await (base / "sub" / "inner.txt").write_bytes(b"in")
+    await (base / "scan.nii").write_bytes(b"0123")
+    return base
+
+
+async def _ask(path: AsyncPath) -> tuple:
+    info = path.pathinfo
+    return (
+        await info.is_dir(), await info.is_file(), await info.exists(),
+        await info.is_symlink(), await info.size(),
+        (await info.mtime()) is not None,
+    )
+
+
+def test_pathinfo_on_listed_children_costs_no_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Counted from the start: the async wrapper binds the in-memory
+    # filesystem's methods when the filesystem is built (once per loop).
+    counts = _count_async_calls(monkeypatch)
+
+    async def go() -> object:
+        base = await _build_info_tree()
+        listed = {
+            "iterdir": [c async for c in base.iterdir()],
+            "glob": [m async for m in base.glob("*.nii")],
+            "rglob": [m async for m in base.rglob("*.txt")],
+            "walk": [p async for p, _, _ in base.walk()][1:],
+        }
+        counts.update(dict.fromkeys(counts, 0))
+        answers = {}
+        for op, paths in listed.items():
+            answers[op] = sorted([(p.name, await _ask(p)) for p in paths])
+        return answers, {k: v for k, v in counts.items() if v}
+
+    answers, calls = _run(go())
+    file4 = (False, True, True, False, 4, True)
+    folder = (True, False, True, False, None, False)
+    assert answers == {
+        "iterdir": [("scan.nii", file4), ("sub", folder)],
+        "glob": [("scan.nii", file4)],
+        "rglob": [("inner.txt", (False, True, True, False, 2, True))],
+        "walk": [("sub", folder)],
+    }
+    assert calls == {}
+
+
+def test_pathinfo_on_an_unlisted_path_asks_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counts = _count_async_calls(monkeypatch)
+
+    async def go() -> object:
+        base = await _build_info_tree()
+        scan = base / "scan.nii"
+        counts.update(dict.fromkeys(counts, 0))
+        first = await _ask(scan)
+        await _ask(scan)
+        calls = {k: v for k, v in counts.items() if v}
+        await scan.unlink()
+        kept = await scan.pathinfo.is_file()
+        missing = await (base / "nope").pathinfo.exists()
+        return first, calls, kept, await scan.exists(), missing
+
+    first, calls, kept, live, missing = _run(go())
+    assert first == (False, True, True, False, 4, True)
+    assert calls == {"info": 1}  # one fs._info answers every question
+    assert (kept, live, missing) == (True, False, False)
+
+
+def test_pathinfo_stays_on_the_listed_child() -> None:
+    async def go() -> object:
+        base = await _build_info_tree()
+        (sub,) = [c async for c in base.iterdir() if c.name == "sub"]
+        derived = [
+            sub / "inner.txt", sub.parent, sub.with_name("x"),
+            await sub.absolute(), await sub.resolve(), AsyncPath(sub),
+        ]
+        return await sub.pathinfo.is_dir(), [d._facts() for d in derived]
+
+    is_dir, leaked = _run(go())
+    assert is_dir is True
+    assert leaked == [None] * 6

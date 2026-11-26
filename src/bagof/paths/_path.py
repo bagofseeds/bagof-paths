@@ -10,6 +10,7 @@ from . import _drivers, _staged
 from . import _engine as engine
 from ._base import BaseWrapper
 from ._local_copy import LocalCopyMixin
+from ._pathinfo import Facts, PathInfo
 from ._purepath import PurePathMixin
 from ._spec import BY_NAME
 
@@ -90,6 +91,49 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         return engine.invoke(
             self, BY_NAME["stat"], (),
             {"follow_symlinks": follow_symlinks},
+        )
+
+    @property
+    def pathinfo(self) -> PathInfo:
+        """What the path is -- directory, file, link -- with its size and
+        modification time, each answer obtained once and then kept.
+
+        A path from `iterdir`, `glob`, `rglob` or `walk` already holds what
+        the listing said wherever the store reports it, so classifying the
+        entries of a large remote directory costs the one listing:
+
+        ```pycon
+        >>> import tempfile
+        >>> folder = Path(tempfile.mkdtemp())
+        >>> (folder / "sub").mkdir()
+        >>> (folder / "scan.nii").write_bytes(b"0123")
+        4
+        >>> for child in sorted(folder.iterdir(), key=str):
+        ...     info = child.pathinfo
+        ...     print(child.name, info.is_dir(), info.size())
+        scan.nii False 4
+        sub True None
+        ```
+
+        ```python
+        for child in Path("s3://bucket/dataset").iterdir():   # one listing
+            if child.pathinfo.is_file():
+                print(child.name, child.pathinfo.size())
+        ```
+
+        Any other path asks the store the first time an answer is needed.
+        The answers say what the path was when they were obtained, as
+        `pathlib`'s `info` does from Python 3.14: they do not change when
+        the file does (ask `is_dir()` or `exists()` for that), and a path
+        derived from this one (`parent`, `/`, `with_name`, ...) does not
+        carry them. `info` is left as the driver's own object.
+        """
+        return self._info_view(PathInfo)
+
+    def _query_facts(self, key: str, facts: Facts) -> tx.Dict[str, tx.Any]:
+        """What the store says about this path, for `pathinfo`."""
+        return _drivers.adapter_for(self._wrapped).query_facts(
+            self, key, facts
         )
 
     def lstat(self) -> os.stat_result:
@@ -381,7 +425,14 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
 
     # -- directory iteration -----------------------------------------------
     def iterdir(self) -> tx.Iterator[tx.Self]:
-        """Yield the paths of the directory's entries."""
+        """Yield the paths of the directory's entries.
+
+        Each holds what the listing said about it as its `pathinfo`, where
+        the store reports it.
+        """
+        listed = _drivers.adapter_for(self._wrapped).listed_children(self)
+        if listed is not None:
+            return listed
         return engine.invoke(self, BY_NAME["iterdir"])
 
     def glob(
@@ -391,7 +442,16 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         case_sensitive: tx.Optional[bool] = None,
         recurse_symlinks: bool = False,
     ) -> tx.Iterator[tx.Self]:
-        """Yield the paths matching `pattern` under this directory."""
+        """Yield the paths matching `pattern` under this directory.
+
+        Like `iterdir`, each holds what the listing said about it as its
+        `pathinfo`, where the store reports it.
+        """
+        listed = self._listed_glob(
+            pattern, case_sensitive, recurse_symlinks, recursive=False
+        )
+        if listed is not None:
+            return listed
         return engine.invoke(
             self, BY_NAME["glob"], (pattern,),
             {
@@ -408,12 +468,36 @@ class Path(PurePathMixin, LocalCopyMixin, BaseWrapper):
         recurse_symlinks: bool = False,
     ) -> tx.Iterator[tx.Self]:
         """Like `glob`, recursively."""
+        listed = self._listed_glob(
+            pattern, case_sensitive, recurse_symlinks, recursive=True
+        )
+        if listed is not None:
+            return listed
         return engine.invoke(
             self, BY_NAME["rglob"], (pattern,),
             {
                 "case_sensitive": case_sensitive,
                 "recurse_symlinks": recurse_symlinks,
             },
+        )
+
+    def _listed_glob(
+        self,
+        pattern: tx.Any,
+        case_sensitive: tx.Optional[bool],
+        recurse_symlinks: bool,
+        *,
+        recursive: bool,
+    ) -> tx.Optional[tx.Iterator[tx.Self]]:
+        # Only the plain call: a keyword the driver handles its own way
+        # (UPath warns that it ignores them) goes to the driver.
+        if (
+            not isinstance(pattern, str) or case_sensitive is not None
+            or recurse_symlinks
+        ):
+            return None
+        return _drivers.adapter_for(self._wrapped).listed_glob(
+            self, pattern, recursive=recursive
         )
 
     # -- creation ----------------------------------------------------------

@@ -24,6 +24,7 @@ those libraries reach.
 | When a method is missing | error | depends | depends | **filled in, or one clear error** |
 | Same behaviour on every store | n/a | mostly | mostly | **yes** |
 | An `await` version | no | no | no | **`AsyncPath`** |
+| A listed entry's type and size, without asking again | type only, from 3.14 (`info`) | no | no | **`pathinfo`, on every version** |
 | Two paths to the same place are equal | n/a | only if same library | only if same library | **always** |
 | Make one from a URL | local only | yes | yes | **yes** |
 | Add support for another store | subclass | fsspec plugin | subclass + register | **one function call, or just wrap it** |

@@ -35,6 +35,7 @@ from ._errors import UnsupportedPathOperation
 from ._fallbacks import MISSING_ERRORS, mode_status
 from ._local_copy import LocalCopyMixin
 from ._path import Path
+from ._pathinfo import AsyncPathInfo, Facts, ask_async
 from ._protocols import merged_storage_options
 from ._purepath import PurePathMixin
 from ._spec import BY_NAME, Member
@@ -208,6 +209,15 @@ def _maybe_async_driver(
     return fsspec_driver.AsyncFSPath.from_url(url, scheme, options)
 
 
+def _kept(item: tx.Any) -> tx.Tuple[tx.Any, tx.Optional[Facts]]:
+    """A sync view's listed child and its listing record, made safe to read
+    from the event loop (run where the listing ran: a worker thread)."""
+    facts = item._listing_facts() if isinstance(item, BaseWrapper) else None
+    if facts is not None:
+        facts.freeze()
+    return item, facts
+
+
 class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
     """The `await` version of [`Path`][bagof.paths.Path]: the same
     methods, as coroutines.
@@ -363,17 +373,31 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
                     iterator = await iterator
                 if hasattr(iterator, "__aiter__"):
                     async for item in iterator:
-                        yield self.with_wrapped(item)
+                        yield self._adopt(item)
                 else:
                     for item in iterator:
-                        yield self.with_wrapped(item)
+                        yield self._adopt(item)
                 return
         sync = self._sync()
         items = await bridge.run(
-            lambda: list(getattr(sync, name)(*args, **kwargs))
+            lambda: [_kept(i) for i in getattr(sync, name)(*args, **kwargs)]
         )
-        for item in items:
-            yield self._wrap(item)
+        for item, facts in items:
+            yield self._wrap_listed(item, facts)
+
+    def _adopt(self, item: tx.Any) -> tx.Self:
+        """A native driver's listed child, holding what its listing said."""
+        facts = getattr(item, "_snapshot", None)
+        if isinstance(facts, Facts) and facts.listed:
+            return self._listed(item, facts)
+        return self.with_wrapped(item)
+
+    def _wrap_listed(self, item: tx.Any, facts: tx.Optional[Facts]) -> tx.Any:
+        """`_wrap` for a listed child of the sync view, keeping its record."""
+        result = self._wrap(item)
+        if facts is not None and isinstance(result, BaseWrapper):
+            result._snapshot = facts
+        return result
 
     # -- status queries ----------------------------------------------------
     async def exists(self, *, follow_symlinks: bool = True) -> bool:
@@ -430,6 +454,44 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
     async def lstat(self) -> os.stat_result:
         """Like `stat`, without following symbolic links."""
         return await self._call("lstat")
+
+    @property
+    def pathinfo(self) -> AsyncPathInfo:
+        """What the path is, as
+        [`Path.pathinfo`][bagof.paths.Path.pathinfo] says, with coroutine
+        methods: `await p.pathinfo.is_dir()`.
+
+        An answer the path already holds -- from the listing that yielded
+        it, or asked before -- is returned without touching the store; any
+        other is asked once, without blocking the event loop.
+        """
+        return self._info_view(AsyncPathInfo)
+
+    async def _aquery_facts(
+        self, key: str, facts: Facts
+    ) -> tx.Dict[str, tx.Any]:
+        """What the store says about this path, for `pathinfo`.
+
+        Never a blocking call on the event loop: a synchronous driver is
+        asked in a worker thread, a native one awaited.
+        """
+        wrapped = self._wrapped
+        if not _is_async_driver(wrapped):
+            sync = self._sync()
+            return await bridge.run(sync._query_facts, key, facts)
+        from ._async_fsspec import AsyncFSPath
+
+        if isinstance(wrapped, AsyncFSPath):
+            # One fs._info() answers every question.
+            found = await wrapped._store_facts()
+            if key not in found:  # a symbolic link: ask what it leads to
+                found.update(await ask_async(self, key, Facts(found)))
+            return found
+        if self.is_local():
+            # A native local driver: the stdlib's answers, in a thread.
+            sync = self._sync()
+            return await bridge.run(sync._query_facts, key, facts)
+        return await ask_async(self, key, facts)
 
     async def samefile(self, other: tx.Any, *, strict: bool = True) -> bool:
         """Whether the path and `other` refer to the same file.
@@ -750,19 +812,26 @@ class AsyncPath(PurePathMixin, LocalCopyMixin, BaseWrapper):
             if hasattr(iterator, "__aiter__"):
                 async for row in iterator:
                     path, dirnames, filenames = row
-                    yield self.with_wrapped(path), dirnames, filenames
+                    yield self._adopt(path), dirnames, filenames
             else:
                 for row in iterator:
                     path, dirnames, filenames = row
-                    yield self.with_wrapped(path), dirnames, filenames
+                    yield self._adopt(path), dirnames, filenames
             return
         rows = self._sync().walk(top_down, on_error, follow_symlinks)
+
+        def step() -> tx.Any:
+            row = next(rows, _WALK_DONE)
+            if row is _WALK_DONE:
+                return row
+            return _kept(row[0]), row[1], row[2]
+
         while True:
-            row = await bridge.run(next, rows, _WALK_DONE)
+            row = await bridge.run(step)
             if row is _WALK_DONE:
                 return
-            dirpath, dirnames, filenames = row
-            yield self._wrap(dirpath), dirnames, filenames
+            (dirpath, facts), dirnames, filenames = row
+            yield self._wrap_listed(dirpath, facts), dirnames, filenames
 
     # -- resolving and expanding -------------------------------------------
     async def resolve(self, strict: bool = False) -> tx.Self:

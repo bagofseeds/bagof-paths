@@ -47,8 +47,8 @@ from pathlib import PurePosixPath
 import typing_extensions as tx
 
 from ._args import is_url, path_text
-from ._drivers import ListedType
 from ._errors import UnsupportedPathOperation
+from ._pathinfo import MISSING, info_facts, listed_facts
 
 # loop -> {(scheme, options-token): AsyncFileSystem}. Weak on the loop so a
 # finished loop's filesystem (and any session it holds) becomes collectable.
@@ -343,9 +343,9 @@ class AsyncFSPath:
             # empty name after its anchor, and the root as its parent.
             self._slash = rest.endswith("/")
         self._path = path
-        # A listing's point-in-time answer about this path's type, set only
-        # on an `iterdir` child; every other path (a derived one included)
-        # is built fresh, without one.
+        # What a listing said about this path (its `pathinfo` record), set
+        # only on a child a listing yielded; every other path (a derived one
+        # included) is built fresh, without one.
         self._snapshot: tx.Any = None
 
     @classmethod
@@ -401,12 +401,13 @@ class AsyncFSPath:
         """A child path from a filesystem path an fsspec method returned."""
         return AsyncFSPath(self._scheme, stripped, self._options)
 
-    def _listed(self, entry: tx.Any) -> AsyncFSPath:
-        """A child from one entry of a detailed listing, with its type."""
+    def _listed(self, entry: tx.Any, name: tx.Any = None) -> AsyncFSPath:
+        """A child from one entry of a detailed listing, with what the
+        listing said about it."""
         if not isinstance(entry, dict):  # a backend that ignores detail
-            return self._child(entry)
-        child = self._child(entry["name"])
-        child._snapshot = ListedType.of(entry)
+            return self._child(entry if name is None else name)
+        child = self._child(entry["name"] if name is None else name)
+        child._snapshot = listed_facts(entry)
         return child
 
     # -- lexical members (synchronous, like PurePath) -----------------------
@@ -571,6 +572,15 @@ class AsyncFSPath:
         fs = await self._fs()
         return _stat_from_info(await fs._info(self._path))
 
+    async def _store_facts(self) -> tx.Dict[str, tx.Any]:
+        """What one `fs._info()` says about this path, for `pathinfo`."""
+        fs = await self._fs()
+        try:
+            info = await fs._info(self._path)
+        except (OSError, ValueError):
+            return dict(MISSING)
+        return info_facts(info) if isinstance(info, dict) else {}
+
     async def touch(self, **_: tx.Any) -> None:
         # Create an empty object when absent; an object store cannot bump the
         # modification time of one that exists, so that case is a no-op.
@@ -660,16 +670,29 @@ class AsyncFSPath:
     ) -> tx.AsyncIterator[AsyncFSPath]:
         fs = await self._fs()
         joined = "{}/{}".format(self._path.rstrip("/"), pattern)
-        for entry in await fs._glob(joined):
-            yield self._child(entry)
+        async for child in self._globbed(fs, joined):
+            yield child
+
+    async def _globbed(
+        self, fs: tx.Any, pattern: str
+    ) -> tx.AsyncIterator[AsyncFSPath]:
+        # fsspec's glob lists with detail and keeps only the names unless
+        # asked; asking keeps what the listing said about each match.
+        found = await fs._glob(pattern, detail=True)
+        if isinstance(found, dict):
+            for name, info in found.items():
+                yield self._listed(info, name)
+        else:  # a backend that ignores detail
+            for name in found:
+                yield self._child(name)
 
     async def rglob(
         self, pattern: str, **_: tx.Any
     ) -> tx.AsyncIterator[AsyncFSPath]:
         fs = await self._fs()
         joined = "{}/**/{}".format(self._path.rstrip("/"), pattern)
-        for entry in await fs._glob(joined):
-            yield self._child(entry)
+        async for child in self._globbed(fs, joined):
+            yield child
 
     # -- creation / removal -------------------------------------------------
     async def mkdir(self, **kwargs: tx.Any) -> None:
@@ -759,12 +782,25 @@ class AsyncFSPath:
         result = fs._walk(self._path, topdown=top_down, detail=True)
         if inspect.isawaitable(result):
             result = await result
+        # A directory the walk enters holds what its parent's listing said.
+        listed: tx.Dict[str, tx.Any] = {}
+
+        def row(root: str, dirs: tx.Any, files: tx.Any) -> tx.Any:
+            path = self._child(root)
+            path._snapshot = listed.pop(root.rstrip("/"), None)
+            if isinstance(dirs, dict):
+                for info in dirs.values():
+                    if isinstance(info, dict) and "name" in info:
+                        name = str(info["name"]).rstrip("/")
+                        listed[name] = listed_facts(info)
+            return path, list(dirs), list(files)
+
         if hasattr(result, "__aiter__"):  # pragma: no cover - real async _walk
             async for root, dirs, files in result:
-                yield self._child(root), list(dirs), list(files)
+                yield row(root, dirs, files)
         else:
             for root, dirs, files in result:
-                yield self._child(root), list(dirs), list(files)
+                yield row(root, dirs, files)
 
     def _check_scheme(self, scheme: str) -> None:
         from ._protocols import canonical_scheme

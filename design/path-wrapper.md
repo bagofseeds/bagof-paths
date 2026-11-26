@@ -662,6 +662,105 @@ registry.
   lifetimes are the same on every driver; a download lands under a hidden
   `.partial-` name first, so a failed one never leaves a half file a later
   fetch would reuse.
+- **What a listing says, and `pathinfo` [settled, owner] (#64).** A
+  remote scan paid one request per entry per question: the fallback `walk`
+  listed a directory and then asked every child `is_dir()` (and
+  `is_symlink()`), and `AsyncFSPath.iterdir` asked fsspec for names only,
+  though fsspec's listing already holds each entry's type, size and time.
+  Measured on a `memory://` tree of 3 directories x 4 files, sync `Path`
+  over UPath: 4 `ls` + 19 `isdir` + 19 `info` before, 4 `ls` after. The
+  consumer (a BIDS indexer) must classify every remote file before
+  downloading any.
+
+  *`info` is untouched.* It stays the driver's own object, because reusing
+  the name would break its callers: it is `UPathInfo` on universal-pathlib,
+  pathlib's `PathInfo` from 3.14, a method on cloudpathlib, and raises on an
+  older stdlib path. The new member is **`pathinfo`**, the same wrapper-owned
+  object on every driver and Python version: `PathInfo` on `Path`,
+  `AsyncPathInfo` on `AsyncPath`, both public (re-exported for annotations
+  and the API pages). `supports("pathinfo")` is a computed member answered
+  from the wrapper class, so it never runs the property; `PurePath` has none.
+
+  *Its methods.* `exists()`, `is_dir()`, `is_file()` (each with
+  `follow_symlinks=True`) and `is_symlink()` are pathlib 3.14's `PathInfo`
+  protocol, so a sync `PathInfo` reads like `Path.info` there. Added:
+  **`size()`** (bytes, `int`) and **`mtime()`** (a POSIX timestamp, `float`),
+  each `None` when the store does not say. The names are `stat()`'s
+  `st_size`/`st_mtime` without the prefix -- the vocabulary a Python reader
+  already compares, in the same units -- and fsspec's own `size`/`mtime`
+  keys. They are methods, not properties, for two reasons: an answer may
+  need a query the first time, and the async twin must be a coroutine of the
+  same name (`await p.pathinfo.size()`). `size()` is the size of a *regular
+  file* only: a directory's is `None` everywhere, where `stat()` would give
+  a block size locally and `0` on an object store. `mtime()` follows the key
+  order of universal-pathlib's own stat (`mtime`, `LastModified`,
+  `last_modified`, ...), ISO strings and datetimes included, then fsspec
+  memory's `created` (its only time, the write time), as our async `stat()`
+  already reads it; an object-store prefix has none. Rejected: `modified()`
+  returning a `datetime` (a second time type beside `stat()`'s), and
+  properties (no async twin).
+
+  *Filled from the listing, at no extra cost,* on the paths `iterdir`,
+  `glob`/`rglob` and `walk` (the directories it yields) produce, where the
+  driver lists with detail:
+
+  | Driver | How the listing keeps its detail |
+  |---|---|
+  | stdlib, pathlib < 3.14 | `iterdir` lists with `os.scandir` (as 3.13's own does), when the running pathlib would: at the call on 3.13, at the first item before; the entry is kept, as 3.14 keeps it |
+  | stdlib, pathlib >= 3.14 | pathlib's own `iterdir`, its children untouched; their `info` (a `DirEntryInfo`) is the entry |
+  | UPath over fsspec | `iterdir`: one `fs.ls(detail=True)`, children built as UPath's own iterdir builds them (Part 1's listing, which also saves UPath's up-front `isdir`); `glob`/`rglob`: UPath's own algorithm step for step, with `fs.glob(..., detail=True)` -- the same single `find(detail=True)` UPath makes, so the same calls and the same paths (parity-tested per pattern) |
+  | `AsyncFSPath` | `_ls(detail=True)`, `_glob(detail=True)`, `_walk(detail=True)` |
+
+  Not carried, and asked once instead: cloudpathlib (its listing's `is_dir`
+  is behind the private `client._list_dir`), the stdlib's `glob` (pathlib
+  keeps no entry), pathlib's native `walk` (3.12+), a UPath flavour with its
+  own `iterdir`/`glob` (http, a `file://` UPath, smb), a call with
+  `case_sensitive=`/`recurse_symlinks=` (left to UPath, which warns), a
+  relative UPath, and an fsspec whose `**` UPath works around. `walk`
+  yields file *names*, so a file's facts come from `iterdir`/`glob`; a
+  child built from a name is a derived path (below).
+
+  *Asked once, otherwise.* The first question asks the store, with as few
+  calls as the driver allows, and every answer is kept: one `os.lstat` (and
+  `os.stat` for a link) for a stdlib path; one `fs.info` for UPath; one
+  `fs._info` for `AsyncFSPath`; for any other driver, one call per question
+  through the path's own status members and one `stat()` for size and time.
+  A path that cannot be reached does not raise, as in pathlib 3.14: an
+  `OSError` reads as "not there", and a store without `is_symlink` has no
+  links (a driver with no `exists`/`is_dir` at all still raises
+  `UnsupportedPathOperation`). fsspec
+  reports a symbolic link as the link itself (its local listing calls a
+  link to a directory `"other"`), so only "it is a link" is taken from such
+  an entry and what it leads to is asked.
+
+  *Point-in-time.* An answer says what the path was when it was obtained:
+  deleting the file afterwards changes `exists()`, not `pathinfo.exists()`.
+  One deliberate divergence from 3.14: its `DirEntryInfo.exists()` stats
+  the entry again, so a listed file deleted afterwards answers
+  `is_file() == True` but `exists() == False`; ours answers `exists()` from
+  the listing too (only a link can lead nowhere), so the answers agree with
+  each other, as 3.14's own `PathInfo` of an unlisted path does. A local
+  listing's size and time are read when first asked (`os.scandir` has no
+  size on POSIX), and kept from then on.
+
+  *Never on a derived path.* The record lives on the wrapper (the private
+  `_snapshot` slot), `with_wrapped` clears it, and `__getstate__` leaves it
+  out of a copy or a pickle (a listing's `os.DirEntry` cannot be pickled).
+  A re-wrapped path (`Path(child)`) is a new path. `p.pathinfo is
+  p.pathinfo`; the info object holds a copy of the path without the record,
+  so the two do not refer to each other. The live `is_dir()`/`exists()` are
+  unchanged and still ask the store.
+
+  *On `AsyncPath`* every method is a coroutine, like every async I/O member,
+  and none makes a blocking call on the event loop: a synchronous driver's
+  listing runs in the worker thread as before, and there each child's lazy
+  entry is *frozen* (its type answers copied out), so the loop never touches
+  an `os.DirEntry`; a query runs in a worker thread for a synchronous driver
+  (or a native local one, through its stdlib view) and is awaited on
+  `AsyncFSPath`. The parity rule is extended accordingly: `test_parity.py`
+  holds `PathInfo` and `AsyncPathInfo` to the same mirror-image rule as the
+  two wrappers (same public methods, same signatures, coroutines on one
+  side only), since a property is invisible to the method checks.
 - **Bucket-relative accessor [owner].** The tensorstore evidence (§2) wants
   bucket + path-within-bucket. Candidate: a `key` property (`path` minus
   `drive`; equals `path` when `drive` is empty), name borrowed from S3/
@@ -834,6 +933,7 @@ bagof.paths
     NoDriverError             # construction: no driver builds this scheme
     NoLocalPathError          # os.fspath on a remote path (also a TypeError)
     ProtocolTraits            # a scheme's traits (introspection)
+    PathInfo, AsyncPathInfo   # what `pathinfo` returns (§5, #64)
     register_driver           # adapter registration (advanced, public)
     register_protocol         # protocol traits registration (advanced, public)
 ```
