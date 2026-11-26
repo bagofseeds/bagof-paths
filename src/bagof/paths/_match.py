@@ -1,4 +1,4 @@
-"""Glob matching for `match` / `full_match`.
+"""Glob matching for `match` / `full_match` (and the shared glob).
 
 `full_match` needs CPython 3.13's `**`-aware, whole-path glob semantics on
 every supported interpreter, so the two translation helpers below are adapted

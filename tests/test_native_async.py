@@ -391,3 +391,123 @@ def test_anyio_driver_end_to_end(tmp_path: pathlib.Path) -> None:
             assert await handle.read() == "hi"
 
     _run(go())
+
+
+# -- a remote native driver: glob and walk on its own surface (#64) ----------
+class _RemoteAsync(os.PathLike):
+    """A remote (s3) natively-async driver over a local tree."""
+
+    protocol = "s3"
+
+    def __init__(self, real: object) -> None:
+        self._real = pathlib.Path(real)
+
+    def __fspath__(self) -> str:
+        return "s3://bucket" + self._real.as_posix()
+
+    __str__ = __fspath__
+
+    def __truediv__(self, other: object) -> "_RemoteAsync":
+        return type(self)(self._real / other)
+
+    @property
+    def name(self) -> str:
+        return self._real.name
+
+    async def exists(self) -> bool:
+        return self._real.exists()
+
+    async def is_dir(self) -> bool:
+        return self._real.is_dir()
+
+    async def is_file(self) -> bool:
+        return self._real.is_file()
+
+    async def iterdir(self) -> object:
+        for child in self._real.iterdir():
+            yield type(self)(child)
+
+    def walk(self, top_down: bool = True) -> object:
+        # A plain generator of rows (no coroutine), as a driver may give.
+        for top, dirs, files in os.walk(self._real, topdown=top_down):
+            yield type(self)(top), dirs, files
+
+
+class _RemoteGlobOnly(_RemoteAsync):
+    """The same store, with its own glob and no listing."""
+
+    iterdir = None  # type: ignore[assignment]
+
+    async def glob(self, pattern: str) -> object:
+        for match in sorted(self._real.glob(pattern)):
+            yield type(self)(match)
+
+
+def _remote_tree(root: pathlib.Path) -> pathlib.Path:
+    (root / "sub" / "deeper").mkdir(parents=True)
+    (root / "sub" / "deeper" / "x.nii").write_text("x")
+    (root / "sub" / "a.txt").write_text("x")
+    (root / "b.txt").write_text("x")
+    return root
+
+
+def _names(paths: object, root: pathlib.Path) -> list:
+    base = "s3://bucket" + root.as_posix()
+    return sorted(str(p)[len(base):].lstrip("/") for p in paths)
+
+
+def test_remote_native_driver_globs_over_its_listing(
+    tmp_path: pathlib.Path,
+) -> None:
+    # No recursive listing of its own: a `**` walks it a directory at a
+    # time, on its coroutine surface.
+    root = _remote_tree(tmp_path)
+
+    async def go() -> object:
+        base = AsyncPath(_RemoteAsync(root))
+        assert not base.is_local()
+        found = [p async for p in base.glob("**/*.txt")]
+        every = [p async for p in base.rglob("*")]
+        return found, every
+
+    found, every = _run(go())
+    assert _names(found, root) == ["b.txt", "sub/a.txt"]
+    assert _names(every, root) == [
+        "b.txt", "sub", "sub/a.txt", "sub/deeper", "sub/deeper/x.nii",
+    ]
+    assert all(isinstance(p.wrapped, _RemoteAsync) for p in found)
+
+
+def test_remote_native_driver_that_cannot_list_keeps_its_glob(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = _remote_tree(tmp_path)
+
+    async def go() -> object:
+        base = AsyncPath(_RemoteGlobOnly(root))
+        return [p async for p in base.glob("*/*.txt")]
+
+    found = _run(go())
+    assert _names(found, root) == ["sub/a.txt"]  # the driver's own glob
+    assert all(isinstance(p.wrapped, _RemoteGlobOnly) for p in found)
+
+
+def test_remote_native_walk_from_a_plain_generator(
+    tmp_path: pathlib.Path,
+) -> None:
+    root = _remote_tree(tmp_path)
+
+    async def go() -> object:
+        base = AsyncPath(_RemoteAsync(root))
+        return [
+            (top, sorted(dirs), sorted(files))
+            async for top, dirs, files in base.walk()
+        ]
+
+    rows = _run(go())
+    assert [(_names([t], root), d, f) for t, d, f in rows] == [
+        ([""], ["sub"], ["b.txt"]),
+        (["sub"], ["deeper"], ["a.txt"]),
+        (["sub/deeper"], [], ["x.nii"]),
+    ]
+    assert all(isinstance(top, AsyncPath) for top, _, _ in rows)
