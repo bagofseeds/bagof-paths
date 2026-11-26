@@ -185,7 +185,11 @@ to fsspec's own async method (`read_bytes`⇐`_cat_file`, `write_bytes`⇐
 `_pipe_file`, `iterdir`⇐`_ls`, `walk`⇐`_walk`, `rmdir`⇐`_rm` with `recursive`
 wired through so a bare `rmdir()` never deletes a tree, `rename`/`move`⇐
 `_mv_file`, `copy`⇐`_cp_file`). `.path` is the backend's own
-`_strip_protocol`, so identity matches `UPath` at the same URL.
+`_strip_protocol`, so identity matches `UPath` at the same URL. A
+`relative_to` result carries an explicit relative flag (s3's `b/k` has no
+leading slash to tell it apart): it prints and joins without the scheme, is
+not absolute, refuses I/O, and -- on every front-end (`_base._is_relative`)
+-- compares as the bare relative POSIX path, as `UPath` does (#65).
 
 Two things are load-bearing:
 

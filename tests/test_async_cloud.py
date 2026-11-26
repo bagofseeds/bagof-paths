@@ -408,7 +408,7 @@ def test_lexical_relative_to_does_not_raise() -> None:
     p = AsyncPath("memasync://bucket/a/b/c.txt")
     base = AsyncPath("memasync://bucket/a")
     assert p.is_relative_to(base) is True
-    assert str(p.relative_to(base)) in ("b/c.txt", "memasync://b/c.txt")
+    assert str(p.relative_to(base)) == "b/c.txt"
     assert p.as_uri() == "memasync://bucket/a/b/c.txt"
 
 
@@ -886,3 +886,124 @@ def test_scheme_keeping_backend_io() -> None:
     assert resolved == "memurl://h/dir/b.txt"
     # resolve() collapses ".." but a directory URL keeps its slash.
     assert folder == "memurl://h/dir/"
+
+
+# -- relative paths (issue #65) ---------------------------------------------
+class _MemBucketFS(_MemAsyncFS):
+    """A backend that strips ``scheme://b/k`` to ``b/k``, as s3 and gs do."""
+
+    protocol = "membucket"
+
+    @classmethod
+    def _strip_protocol(cls, path: str) -> str:
+        text = path.replace("membucket://", "memory://")
+        return MemoryFileSystem._strip_protocol(text).lstrip("/")
+
+
+fsspec.register_implementation("membucket", _MemBucketFS, clobber=True)
+
+
+@pytest.mark.parametrize("scheme", ["memasync", "membucket"])
+def test_relative_to_prints_without_the_scheme(scheme: str) -> None:
+    p = AsyncPath(f"{scheme}://ds/sub-01/anat")
+    r = p.relative_to(AsyncPath(f"{scheme}://ds"))
+    assert isinstance(r.wrapped, AsyncFSPath)
+    assert str(r) == "sub-01/anat"
+    assert r.parts == ("sub-01", "anat")
+    assert r.as_posix() == "sub-01/anat"
+    assert r.protocol == scheme
+    assert not r.is_absolute()
+    assert not r.is_local()
+    assert p.is_absolute()
+    with pytest.raises(ValueError):
+        r.as_uri()
+
+
+@pytest.mark.parametrize("scheme", ["memasync", "membucket"])
+def test_relative_path_derivations_stay_relative(scheme: str) -> None:
+    r = AsyncPath(f"{scheme}://ds/sub-01/anat/t1.nii").relative_to(
+        f"{scheme}://ds"
+    )
+    assert str(r / "x") == "sub-01/anat/t1.nii/x"
+    assert str(r.joinpath("a", "b")) == "sub-01/anat/t1.nii/a/b"
+    assert str(r.parent) == "sub-01/anat"
+    assert [str(a) for a in r.parents] == ["sub-01/anat", "sub-01", "."]
+    assert str(r.with_name("t2.nii")) == "sub-01/anat/t2.nii"
+    assert str(r.with_stem("t2")) == "sub-01/anat/t2.nii"
+    assert str(r.with_suffix(".gz")) == "sub-01/anat/t1.gz"
+    for derived in (r / "x", r.parent, r.with_name("y"), r.with_suffix(".z")):
+        assert not derived.is_absolute()
+    # Joined onto an absolute path, it names a location again.
+    joined = AsyncPath(f"{scheme}://other") / r
+    assert joined == AsyncPath(f"{scheme}://other/sub-01/anat/t1.nii")
+    assert joined.is_absolute()
+    # A relative path is relative to a relative prefix only.
+    assert str(r.relative_to("sub-01")) == "anat/t1.nii"
+    assert r.is_relative_to(r.parent)
+    assert not r.is_relative_to(f"{scheme}://ds")
+
+
+@pytest.mark.parametrize("scheme", ["memasync", "membucket"])
+def test_relative_path_identity(scheme: str) -> None:
+    r = AsyncPath(f"{scheme}://ds/sub-01/anat").relative_to(f"{scheme}://ds")
+    same = AsyncPath(f"{scheme}://x/sub-01/anat").relative_to(f"{scheme}://x")
+    assert r == same
+    assert hash(r) == hash(same)
+    # Never the absolute path its parts spell, even where a key has no
+    # leading slash (s3's `sub-01/anat` is the bucket `sub-01`).
+    assert r != AsyncPath(f"{scheme}://sub-01/anat")
+    assert r == AsyncPath(f"{scheme}://ds/sub-01/anat/t1").parent.relative_to(
+        AsyncPath(f"{scheme}://ds")
+    )
+
+
+def test_relative_path_matches_the_sync_path() -> None:
+    pytest.importorskip("upath")
+    a = AsyncPath("memasync://ds/sub-01/anat").relative_to("memasync://ds")
+    s = Path("memasync://ds/sub-01/anat").relative_to("memasync://ds")
+    assert str(a) == str(s) == "sub-01/anat"
+    assert a.parts == s.parts
+    assert a.is_absolute() is s.is_absolute() is False
+    assert a == s
+    assert hash(a) == hash(s)
+    assert s != Path("memasync://sub-01/anat")
+
+
+def test_absolute_bucket_path_is_absolute() -> None:
+    # A key stripped without a leading slash still names an absolute path.
+    p = AsyncPath("membucket://b/k.txt")
+    assert p.path == "b/k.txt"
+    assert p.is_absolute()
+    assert p.parent.is_absolute()
+    assert str(p.parent) == "membucket://b"
+
+
+def test_relative_path_refuses_io() -> None:
+    r = AsyncPath("memasync://ds/a.txt").relative_to("memasync://ds")
+    with pytest.raises(UnsupportedPathOperation, match="relative"):
+        _run(r.read_bytes())
+    with pytest.raises(UnsupportedPathOperation, match="relative"):
+        _run(r.exists())
+
+
+def test_relative_target_resolves_beside_the_source() -> None:
+    async def go() -> object:
+        src = AsyncPath("memasync://b/d/a.txt")
+        await src.write_text("hi")
+        rel = AsyncPath("memasync://x/c.txt").relative_to("memasync://x")
+        moved = await src.rename(rel)
+        return str(moved), await moved.read_text()
+
+    # A relative target is a name beside the source, as a bare string is.
+    assert _run(go()) == ("memasync://b/d/c.txt", "hi")
+
+
+def test_scheme_keeping_backend_relative_path() -> None:
+    r = AsyncPath("memurl://h/dir/x.txt").relative_to("memurl://h")
+    assert isinstance(r.wrapped, AsyncFSPath)
+    assert str(r) == "dir/x.txt"
+    assert r.protocol == "memurl"
+    assert not r.is_absolute()
+    assert not r.is_local()
+    assert str(r.parent) == "dir"
+    assert AsyncPath("memurl://h/") / r == AsyncPath("memurl://h/dir/x.txt")
