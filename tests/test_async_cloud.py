@@ -886,3 +886,65 @@ def test_scheme_keeping_backend_io() -> None:
     assert resolved == "memurl://h/dir/b.txt"
     # resolve() collapses ".." but a directory URL keeps its slash.
     assert folder == "memurl://h/dir/"
+
+
+# -- walk from one listing per directory (#64) -------------------------------
+def test_walk_lists_each_directory_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def build() -> None:
+        for d in range(3):
+            for f in range(4):
+                await AsyncPath(f"memasync://b/root/d{d}/f{f}.txt").write_bytes(
+                    b"x"
+                )
+
+    _run(build())
+    counted = ("ls", "isdir", "isfile", "info", "exists")
+    counts = dict.fromkeys(counted, 0)
+    for name in counted:
+        original = getattr(MemoryFileSystem, name)
+
+        def count(
+            self: object, *args: object, _name: str = name,
+            _original: object = original, **kwargs: object,
+        ) -> object:
+            counts[_name] += 1
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(MemoryFileSystem, name, count)
+
+    async def go() -> object:
+        return {
+            path.name: (sorted(dirs), sorted(files))
+            async for path, dirs, files in AsyncPath("memasync://b/root").walk()
+        }
+
+    files = ["f0.txt", "f1.txt", "f2.txt", "f3.txt"]
+    assert _run(go()) == {
+        "root": (["d0", "d1", "d2"], []),
+        "d0": ([], files), "d1": ([], files), "d2": ([], files),
+    }
+    # One listing per directory; no child is asked what it is.
+    assert counts == {"ls": 4, "isdir": 0, "isfile": 0, "info": 0,
+                      "exists": 0}
+
+
+def test_iterdir_snapshot_stays_on_the_listed_child() -> None:
+    async def go() -> object:
+        await AsyncPath("memasync://b/snap/sub/f.txt").write_bytes(b"x")
+        (child,) = [c async for c in AsyncPath("memasync://b/snap").iterdir()]
+        listed = child.wrapped._snapshot.is_dir()
+        derived = [
+            child / "f.txt", child.parent, child.with_name("other"),
+            child.joinpath("x"),
+        ]
+        leaked = [d.wrapped._snapshot for d in derived]
+        await child.rmdir(recursive=True)
+        return listed, leaked, await child.is_dir(), await child.exists()
+
+    listed, leaked, is_dir, exists = _run(go())
+    assert listed is True
+    assert leaked == [None, None, None, None]
+    # The public status members ask the store, not the listing.
+    assert (is_dir, exists) == (False, False)

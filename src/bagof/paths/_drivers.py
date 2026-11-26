@@ -25,6 +25,7 @@ from __future__ import annotations
 import errno
 import inspect
 import os
+import pathlib
 import shutil
 
 import typing_extensions as tx
@@ -38,6 +39,61 @@ def _accepts(func: tx.Any, name: str) -> bool:
         return name in inspect.signature(func).parameters
     except (TypeError, ValueError):  # pragma: no cover
         return False
+
+
+class ListedType:
+    """A child's type as an fsspec listing reported it (an info dict).
+
+    The same shape as `os.DirEntry.is_dir`, so a walk reads either one the
+    same way. A point-in-time answer: the listing's, not a fresh query.
+    """
+
+    __slots__ = ("_dir",)
+
+    def __init__(self, info: tx.Mapping[str, tx.Any]) -> None:
+        self._dir = info.get("type") == "directory"
+
+    def is_dir(self, *, follow_symlinks: bool = True) -> bool:
+        return self._dir
+
+    @classmethod
+    def of(cls, info: tx.Any) -> tx.Optional[ListedType]:
+        """The type in a listing entry, or None where it does not say.
+
+        A listing that ignored `detail` gives no type. A symlink's listed
+        type is the link's own (fsspec's local listing calls a link to a
+        directory "other"), so a symlink is asked, not trusted.
+        """
+        if not isinstance(info, dict) or "type" not in info:
+            return None
+        if info.get("islink"):
+            return None
+        return cls(info)
+
+
+def _is_stock_local(wrapped: tx.Any) -> bool:
+    """Whether `wrapped` is a stdlib local path listed the stdlib way.
+
+    Then `os.scandir` gives the same children as its `iterdir`, with their
+    types. A subclass that redefines how it lists or classifies is not.
+    """
+    if not isinstance(wrapped, pathlib.Path):
+        return False
+    kind = type(wrapped)
+    return all(
+        getattr(kind, name, None) is getattr(pathlib.Path, name)
+        for name in ("iterdir", "is_dir", "is_symlink")
+    )
+
+
+def _lists_with_fsspec(wrapped: tx.Any) -> bool:
+    """Whether `wrapped` is a universal-pathlib path over an fsspec store.
+
+    Its local flavor (a stdlib path subclass) is listed the stdlib way.
+    """
+    return not isinstance(wrapped, pathlib.Path) and hasattr(
+        type(wrapped), "fs"
+    )
 
 
 class GenericAdapter:
@@ -147,6 +203,26 @@ class GenericAdapter:
             follow_symlinks=follow_symlinks,
         )
 
+    def _listing(
+        self, wrapper: tx.Any, *, known_dir: bool
+    ) -> tx.List[tx.Any]:
+        """The children of `wrapper`, in one listing.
+
+        A child carries the listing's own type answer where the driver's
+        listing gives one (`os.scandir` for a stdlib local path); otherwise
+        it is a plain `iterdir()` child, classified by asking it. A known
+        directory (one a parent listing reported) skips any check that the
+        path is a directory.
+        """
+        wrapped = wrapper._wrapped
+        if _is_stock_local(wrapped):
+            with os.scandir(wrapped) as scan:
+                return [
+                    wrapper._listed(wrapped / entry.name, entry)
+                    for entry in scan
+                ]
+        return list(wrapper.iterdir())
+
     def _walk_fallback(
         self,
         wrapper: tx.Any,
@@ -154,19 +230,27 @@ class GenericAdapter:
         top_down: bool,
         on_error: tx.Any,
         follow_symlinks: bool,
+        known_dir: bool = False,
     ) -> tx.Iterator[tx.Tuple[tx.Any, tx.List[str], tx.List[str]]]:
-        # Synthesized for pathlib < 3.12.
+        # Synthesized for pathlib < 3.12, and for drivers whose own walk asks
+        # every child for its type.
         try:
-            entries = list(wrapper.iterdir())
+            entries = self._listing(wrapper, known_dir=known_dir)
         except OSError as error:
             if on_error is not None:
                 on_error(error)
             return
         dirnames: tx.List[str] = []
         filenames: tx.List[str] = []
+        listed_dirs = set()
         for entry in entries:
+            snapshot = getattr(entry, "_snapshot", None)
             try:
-                is_dir = entry.is_dir()
+                if snapshot is not None:
+                    # The listing's answer: no query per child.
+                    is_dir = snapshot.is_dir(follow_symlinks=follow_symlinks)
+                else:
+                    is_dir = entry.is_dir()
             except OSError as error:
                 if on_error is not None:
                     on_error(error)
@@ -174,11 +258,17 @@ class GenericAdapter:
             # Mirror native walk: with follow_symlinks=False a symlinked
             # directory is classified as a file (is_dir(follow_symlinks=False)
             # is what pathlib uses), which is also what stops symlink cycles.
-            if is_dir and not follow_symlinks and entry.is_symlink():
+            if (
+                snapshot is None and is_dir and not follow_symlinks
+                and entry.is_symlink()
+            ):
                 is_dir = False
             # The store's own names, as a native walk reports them, so that
             # entries whose names differ only after a "?" stay apart.
-            (dirnames if is_dir else filenames).append(entry._store_name())
+            name = entry._store_name()
+            (dirnames if is_dir else filenames).append(name)
+            if is_dir and snapshot is not None:
+                listed_dirs.add(name)
 
         if top_down:
             yield wrapper, dirnames, filenames
@@ -191,6 +281,7 @@ class GenericAdapter:
                 top_down=top_down,
                 on_error=on_error,
                 follow_symlinks=follow_symlinks,
+                known_dir=name in listed_dirs,
             )
         if not top_down:
             yield wrapper, dirnames, filenames
@@ -208,6 +299,87 @@ class UPathAdapter(GenericAdapter):
 
     def move(self, wrapper: tx.Any, target: tx.Any) -> None:
         wrapper._wrapped.move(target)
+
+    def walk(
+        self,
+        wrapper: tx.Any,
+        *,
+        top_down: bool,
+        on_error: tx.Any,
+        follow_symlinks: bool,
+    ) -> tx.Iterator[tx.Tuple[tx.Any, tx.List[str], tx.List[str]]]:
+        # UPath's own walk lists a directory, drops the listing's types, and
+        # then asks every child whether it is a directory. Walking from one
+        # detailed listing per directory gives the same tree for one call.
+        if not _lists_with_fsspec(wrapper._wrapped):
+            yield from super().walk(
+                wrapper,
+                top_down=top_down,
+                on_error=on_error,
+                follow_symlinks=follow_symlinks,
+            )
+            return
+        yield from self._walk_fallback(
+            wrapper,
+            top_down=top_down,
+            on_error=on_error,
+            follow_symlinks=follow_symlinks,
+        )
+
+    def _listing(
+        self, wrapper: tx.Any, *, known_dir: bool
+    ) -> tx.List[tx.Any]:
+        wrapped = wrapper._wrapped
+        if not _lists_with_fsspec(wrapped):
+            return super()._listing(wrapper, known_dir=known_dir)
+        # The children UPath's iterdir gives, from fs.ls(detail=True): the
+        # directory itself, "."/".." and a repeated name are not children.
+        sep = getattr(getattr(wrapped, "parser", None), "sep", "/")
+        base = wrapped.parent if wrapped.parts[-1:] == ("",) else wrapped
+        fs = base.fs
+        base_path = base.path
+        base_name = _drop_suffix(base_path, sep)
+        found: tx.Dict[str, tx.Any] = {}
+        try:
+            listing = fs.ls(base_path, detail=True)
+        except FileNotFoundError:
+            # As UPath's iterdir reports a missing directory.
+            raise NotADirectoryError(str(wrapped)) from None
+        for info in listing:
+            snapshot = ListedType.of(info)
+            name = info.get("name", "") if isinstance(info, dict) else info
+            name = _drop_suffix(name, sep)
+            if name == base_name:
+                continue
+            name = name.rpartition(sep)[2]
+            if name in (".", ".."):
+                continue
+            # A file and a directory can share a name on an object store;
+            # one child, a directory if either is (as isdir() answers).
+            if name in found and (
+                found[name] is None or found[name].is_dir()
+            ):
+                continue
+            found[name] = snapshot
+        if not found and not known_dir and not fs.isdir(base_path):
+            # An empty listing is an empty directory, or no directory at
+            # all; ask again without a cached listing, as UPath does.
+            fs.invalidate_cache(base_path)
+            if not fs.isdir(base_path):
+                raise NotADirectoryError(str(wrapped))
+        rebuild = getattr(base, "with_segments", None)
+        return [
+            wrapper._listed(
+                rebuild(base_path, name) if callable(rebuild)
+                else base / name,
+                snapshot,
+            )
+            for name, snapshot in found.items()
+        ]
+
+
+def _drop_suffix(text: str, suffix: str) -> str:
+    return text[: -len(suffix)] if text.endswith(suffix) else text
 
 
 class CloudPathAdapter(GenericAdapter):

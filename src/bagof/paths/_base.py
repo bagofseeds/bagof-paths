@@ -57,7 +57,10 @@ _MISSING = object()
 class BaseWrapper:
     """Wrap a path-like object and expose it through one uniform surface."""
 
-    __slots__ = ("_wrapped",)
+    # `_snapshot` is a point-in-time type answer a directory listing gave
+    # for this path (see `_drivers`); only a walk reads it, and it is never
+    # carried onto a derived path. Unset on a path built any other way.
+    __slots__ = ("_wrapped", "_snapshot")
 
     # Which front-end family this wrapper belongs to: whether its I/O
     # methods are synchronous or coroutines. It does not enter identity --
@@ -245,6 +248,15 @@ class BaseWrapper:
         """
         new = copy.copy(self)
         new._wrapped = wrapped
+        # A listing's snapshot describes this path only, never another.
+        new._snapshot = None
+        return new
+
+    def _listed(self, wrapped: tx.Any, snapshot: tx.Any) -> tx.Self:
+        """A child built from a directory listing, with the listing's
+        point-in-time answer about its type (read only by a walk)."""
+        new = self.with_wrapped(wrapped)
+        new._snapshot = snapshot
         return new
 
     def _coerce_target(self, target: tx.Any) -> tx.Any:

@@ -492,3 +492,200 @@ def test_move_directory_without_replace(tmp_path: pathlib.Path) -> None:
     Path(_NoReplace(src)).move(tmp_path / "dst")
     assert (tmp_path / "dst" / "f.txt").read_text() == "x"
     assert not src.exists()  # dir source removed via recursive rmdir
+
+
+# -- walk from one listing per directory (#64) ------------------------------
+# A walk classifies each child from the listing that found it, where the
+# driver's listing says what each child is; it asks a child only where the
+# listing does not say.
+_COUNTED = ("ls", "isdir", "isfile", "info", "exists")
+
+
+def _count_memory_calls(monkeypatch: pytest.MonkeyPatch) -> dict:
+    memory = pytest.importorskip("fsspec.implementations.memory")
+    counts = dict.fromkeys(_COUNTED, 0)
+    for name in _COUNTED:
+        original = getattr(memory.MemoryFileSystem, name)
+
+        def counted(
+            self: object, *args: object, _name: str = name,
+            _original: object = original, **kwargs: object,
+        ) -> object:
+            counts[_name] += 1
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(memory.MemoryFileSystem, name, counted)
+    return counts
+
+
+def _memory_tree(root: str) -> object:
+    UPath = pytest.importorskip("upath").UPath
+    base = UPath(root)
+    for d in range(3):
+        for f in range(4):
+            (base / f"d{d}" / f"f{f}.txt").write_bytes(b"x")
+    return base
+
+
+_TREE = {
+    "root": (["d0", "d1", "d2"], []),
+    "d0": ([], ["f0.txt", "f1.txt", "f2.txt", "f3.txt"]),
+    "d1": ([], ["f0.txt", "f1.txt", "f2.txt", "f3.txt"]),
+    "d2": ([], ["f0.txt", "f1.txt", "f2.txt", "f3.txt"]),
+}
+
+
+def test_upath_walk_lists_each_directory_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = _memory_tree("memory://bagofpaths-walk-count/root")
+    counts = _count_memory_calls(monkeypatch)
+    rows = {
+        dp.name: (sorted(dn), sorted(fn)) for dp, dn, fn in Path(base).walk()
+    }
+    assert rows == _TREE
+    # One listing per directory; no child is asked what it is.
+    assert counts == {"ls": 4, "isdir": 0, "isfile": 0, "info": 0,
+                      "exists": 0}
+
+
+def test_upath_walk_without_listing_detail_asks_each_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A backend whose listing ignores detail= still walks the same tree,
+    # classifying each child by asking it, as before.
+    memory = pytest.importorskip("fsspec.implementations.memory")
+    base = _memory_tree("memory://bagofpaths-walk-nodetail/root")
+    original = memory.MemoryFileSystem.ls
+
+    def names_only(
+        self: object, path: str, detail: bool = False, **kwargs: object
+    ) -> object:
+        return original(self, path, detail=False, **kwargs)
+
+    monkeypatch.setattr(memory.MemoryFileSystem, "ls", names_only)
+    rows = {
+        dp.name: (sorted(dn), sorted(fn)) for dp, dn, fn in Path(base).walk()
+    }
+    assert rows == _TREE
+
+
+def test_upath_walk_missing_and_file_roots_report_on_error() -> None:
+    base = _memory_tree("memory://bagofpaths-walk-errors/root")
+    for root in (base / "nope", base / "d0" / "f0.txt"):
+        errors: list = []
+        assert list(Path(root).walk(on_error=errors.append)) == []
+        assert [type(e) for e in errors] == [NotADirectoryError]
+    empty = base / "empty"
+    empty.mkdir()
+    assert [(dn, fn) for _dp, dn, fn in Path(empty).walk()] == [([], [])]
+
+
+def test_walk_without_listing_detail_walks_correctly(
+    tmp_path: pathlib.Path,
+) -> None:
+    # _NoWalk lists with iterdir() only: each child is asked for its type.
+    asked = []
+
+    class _Counting(_NoWalk):
+        def __truediv__(self, other: object) -> "_Counting":
+            return _Counting(self._real / other)
+
+        def iterdir(self) -> object:
+            return (_Counting(p) for p in self._real.iterdir())
+
+        def is_dir(self, follow_symlinks: bool = True) -> bool:
+            asked.append(self.name)
+            return super().is_dir()
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").touch()
+    (tmp_path / "a.txt").touch()
+    rows = {
+        str(dp): (sorted(dn), sorted(fn))
+        for dp, dn, fn in Path(_Counting(tmp_path)).walk()
+    }
+    assert rows == {
+        str(tmp_path): (["sub"], ["a.txt"]),
+        str(tmp_path / "sub"): ([], ["b.txt"]),
+    }
+    assert sorted(asked) == ["a.txt", "b.txt", "sub"]
+
+
+def test_stdlib_walk_fallback_classifies_from_scandir(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The synthesized walk (pathlib < 3.12) reads each child's type from
+    # os.scandir, so no child is stat'ed again. Driven directly here so it
+    # runs on interpreters whose pathlib has its own walk.
+    from bagof.paths._drivers import GenericAdapter
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").touch()
+    (tmp_path / "a.txt").touch()
+    if hasattr(os, "symlink"):
+        (tmp_path / "sub" / "loop").symlink_to(
+            tmp_path, target_is_directory=True
+        )
+    asked = []
+    for name in ("is_dir", "is_symlink"):
+        original = getattr(pathlib.Path, name)
+
+        def counted(
+            self: pathlib.Path, *args: object, _original: object = original,
+            **kwargs: object,
+        ) -> object:
+            asked.append(self.name)
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, name, counted)
+    for follow in (False, True):
+        rows = GenericAdapter()._walk_fallback(
+            Path(tmp_path), top_down=True, on_error=None,
+            follow_symlinks=follow,
+        )
+        if follow:  # a symlinked directory is entered: stop at depth 3
+            rows = (r for r, _ in zip(rows, range(3)))
+        seen = {str(dp): (sorted(dn), sorted(fn)) for dp, dn, fn in rows}
+        assert seen[str(tmp_path)] == (["sub"], ["a.txt"])
+        loop = ["loop"] if hasattr(os, "symlink") else []
+        if follow:
+            assert seen[str(tmp_path / "sub")] == (loop, ["b.txt"])
+        else:
+            files = sorted(["b.txt"] + loop)
+            assert seen[str(tmp_path / "sub")] == ([], files)
+    assert asked == []
+
+
+def test_listing_snapshot_stays_on_the_listed_child(
+    tmp_path: pathlib.Path,
+) -> None:
+    # A child's listed type is the listing's alone: a path derived from the
+    # child does not carry it, and the public status members ask afresh.
+    from bagof.paths._drivers import GenericAdapter
+
+    (tmp_path / "sub").mkdir()
+    (child,) = GenericAdapter()._listing(Path(tmp_path), known_dir=False)
+    assert child._snapshot is not None
+    for derived in (
+        child / "x", child.parent, child.with_name("y"),
+        child.joinpath("z"), child.with_wrapped(child.wrapped),
+    ):
+        assert getattr(derived, "_snapshot", None) is None
+    (tmp_path / "sub").rmdir()
+    assert child.is_dir() is False  # asks the filesystem, not the listing
+    assert child.exists() is False
+
+
+def test_upath_listing_snapshot_stays_on_the_listed_child() -> None:
+    from bagof.paths._drivers import adapter_for
+
+    base = _memory_tree("memory://bagofpaths-walk-leak/root")
+    wrapper = Path(base)
+    children = adapter_for(base)._listing(wrapper, known_dir=False)
+    child = next(c for c in children if c.name == "d0")
+    assert child._snapshot.is_dir()
+    for derived in (child / "f0.txt", child.parent, child.with_name("d9")):
+        assert getattr(derived, "_snapshot", None) is None
+    child.rmdir(recursive=True)
+    assert child.is_dir() is False

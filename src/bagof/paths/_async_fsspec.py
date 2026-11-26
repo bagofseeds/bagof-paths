@@ -47,6 +47,7 @@ from pathlib import PurePosixPath
 import typing_extensions as tx
 
 from ._args import is_url, path_text
+from ._drivers import ListedType
 from ._errors import UnsupportedPathOperation
 
 # loop -> {(scheme, options-token): AsyncFileSystem}. Weak on the loop so a
@@ -307,7 +308,10 @@ class _AsyncFSFile:
 class AsyncFSPath:
     """A path on an fsspec async filesystem, wrapped by `AsyncPath`."""
 
-    __slots__ = ("_scheme", "_path", "_options", "_pure", "_anchor", "_slash")
+    __slots__ = (
+        "_scheme", "_path", "_options", "_pure", "_anchor", "_slash",
+        "_snapshot",
+    )
 
     def __init__(
         self,
@@ -339,6 +343,10 @@ class AsyncFSPath:
             # empty name after its anchor, and the root as its parent.
             self._slash = rest.endswith("/")
         self._path = path
+        # A listing's point-in-time answer about this path's type, set only
+        # on an `iterdir` child; every other path (a derived one included)
+        # is built fresh, without one.
+        self._snapshot: tx.Any = None
 
     @classmethod
     def from_url(
@@ -392,6 +400,14 @@ class AsyncFSPath:
     def _child(self, stripped: str) -> AsyncFSPath:
         """A child path from a filesystem path an fsspec method returned."""
         return AsyncFSPath(self._scheme, stripped, self._options)
+
+    def _listed(self, entry: tx.Any) -> AsyncFSPath:
+        """A child from one entry of a detailed listing, with its type."""
+        if not isinstance(entry, dict):  # a backend that ignores detail
+            return self._child(entry)
+        child = self._child(entry["name"])
+        child._snapshot = ListedType.of(entry)
+        return child
 
     # -- lexical members (synchronous, like PurePath) -----------------------
     # A trailing slash on an anchored path is an empty last part, so the
@@ -634,8 +650,10 @@ class AsyncFSPath:
     # -- directory iteration ------------------------------------------------
     async def iterdir(self) -> tx.AsyncIterator[AsyncFSPath]:
         fs = await self._fs()
-        for entry in await fs._ls(self._path, detail=False):
-            yield self._child(entry)
+        # The detailed listing costs the same call and keeps each child's
+        # type, so a walk over these children asks no child again.
+        for entry in await fs._ls(self._path, detail=True):
+            yield self._listed(entry)
 
     async def glob(
         self, pattern: str, **_: tx.Any
@@ -735,7 +753,10 @@ class AsyncFSPath:
         self, top_down: bool = True, *args: tx.Any, **kwargs: tx.Any
     ) -> tx.AsyncIterator[tx.Tuple[AsyncFSPath, tx.List[str], tx.List[str]]]:
         fs = await self._fs()
-        result = fs._walk(self._path, topdown=top_down)
+        # One detailed listing per directory: fsspec classifies each child
+        # from it (the names are the keys, in listing order), so no child is
+        # asked for its type.
+        result = fs._walk(self._path, topdown=top_down, detail=True)
         if inspect.isawaitable(result):
             result = await result
         if hasattr(result, "__aiter__"):  # pragma: no cover - real async _walk
