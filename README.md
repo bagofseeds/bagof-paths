@@ -174,7 +174,13 @@ the synchronous driver in a worker thread, so the same code works either way.
 A direct connection belongs to the event loop it was opened on, and is closed
 when that loop finishes: `asyncio.run` does this for you. A loop you run by
 hand closes its connections when you call `loop.shutdown_asyncgens()` before
-`loop.close()`, as asyncio recommends.
+`loop.close()`, as asyncio recommends. A loop closed without it leaves its
+connections open: nothing can close them on a closed loop.
+
+The connections close after every other async generator the loop is closing,
+so the `finally` block of an async generator can still read and write through
+them. Once the loop has begun closing its async generators, it can open no new
+connection: an operation that would need one raises `RuntimeError`.
 
 ## Parsing without a backend
 

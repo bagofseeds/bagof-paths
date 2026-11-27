@@ -18,6 +18,15 @@ filesystem for the loop it is running on, building one (with
 `skip_instance_cache=True`) the first time and caching it weakly against that
 loop.
 
+In async mode s3fs, fsspec's HTTP filesystem and adlfs leave closing their
+client session to the caller. So the first filesystem with a session cached
+on a loop starts an async generator there, which the loop closes in
+`shutdown_asyncgens()`; it waits for the other generators closed alongside it
+and then closes every session the loop's filesystems hold. After that the loop
+can open no new session: an operation that would need one raises
+`RuntimeError`. A loop closed without `shutdown_asyncgens()` leaks its
+sessions' connections, as it leaks any other async generator's cleanup.
+
 Most backends strip the scheme off a URL to get their filesystem path
 (`s3://b/k` is `b/k`), but some keep the whole URL as the path -- fsspec's
 HTTP filesystem does, since a URL is the only name it has. For such a backend
@@ -51,7 +60,8 @@ from ._errors import UnsupportedPathOperation
 from ._pathinfo import info_view, listed_facts
 
 # loop -> {(scheme, options-token): AsyncFileSystem}. Weak on the loop so a
-# finished loop's filesystem (and any session it holds) becomes collectable.
+# finished loop's filesystem becomes collectable -- unless the filesystem holds
+# a client session, which keeps the loop alive (see `_sweep_closed_loops`).
 _FS_BY_LOOP: weakref.WeakKeyDictionary[tx.Any, tx.Dict[tx.Any, tx.Any]] = (
     weakref.WeakKeyDictionary()
 )
@@ -59,8 +69,11 @@ _FS_BY_LOOP: weakref.WeakKeyDictionary[tx.Any, tx.Dict[tx.Any, tx.Any]] = (
 # the (scheme, options-token) keys that map to filesystems.
 _LOCK_KEY = object()
 # ... and, under this one, the async generator that closes the loop's
-# filesystems when the loop shuts its async generators down.
+# client sessions when the loop shuts its async generators down. It is only
+# started once a filesystem holding a session is cached on the loop.
 _CLOSER_KEY = object()
+# The loops whose closer has run: no closer can be started on them again.
+_SHUT_DOWN: weakref.WeakSet[tx.Any] = weakref.WeakSet()
 
 # filesystem class -> whether its filesystem path keeps the URL scheme.
 _KEEPS_SCHEME: tx.Dict[tx.Any, bool] = {}
@@ -175,13 +188,15 @@ def _client_session(fs: tx.Any) -> tx.Any:
     """The client session an async filesystem holds, or None.
 
     s3fs keeps its client context in `_s3creator`; fsspec's HTTP
-    filesystem (and gcsfs) keep an aiohttp session in `_session`. A
+    filesystem (and gcsfs) keep an aiohttp session in `_session`; adlfs
+    keeps an async Azure `service_client`, whose transport holds one. A
     filesystem without one (an in-memory store) has nothing to close.
     """
-    creator = getattr(fs, "_s3creator", None)
-    if creator is not None:
-        return creator
-    return getattr(fs, "_session", None)
+    for name in ("_s3creator", "_session", "service_client"):
+        session = getattr(fs, name, None)
+        if session is not None:
+            return session
+    return None
 
 
 async def _close_session(fs: tx.Any) -> None:
@@ -208,66 +223,94 @@ async def _close_session(fs: tx.Any) -> None:
             await result
 
 
-def _drop_session(fs: tx.Any) -> None:
-    """Close an async filesystem's session after its loop has closed.
+def _closing_generator(task: tx.Any) -> bool:
+    """Whether a task is closing an async generator (running its `aclose()`).
 
-    Nothing can be awaited on a closed loop, so this goes through the
-    backend's own `close_session(loop, session)`, which closes the
-    connector's sockets directly when given no running loop.
+    `loop.shutdown_asyncgens()` closes every live generator at once, each
+    `aclose()` in a task of its own; a generator collected while its loop
+    runs is closed the same way. Such a task runs over the `aclose()`
+    awaitable itself, not over a coroutine.
     """
-    session = _client_session(fs)
-    close = getattr(type(fs), "close_session", None)
-    if session is None or close is None:
+    coro = task.get_coro()
+    return coro is not None and type(coro).__name__ == "async_generator_athrow"
+
+
+async def _other_generators_closed() -> None:
+    """Wait until the other async generators being closed now are closed.
+
+    `loop.shutdown_asyncgens()` closes the closer together with every other
+    live generator, and their `finally` blocks may still read or write
+    through the sessions the closer is about to close. Those closings are
+    awaited by `shutdown_asyncgens()` itself, so waiting for them here
+    never makes the shutdown wait for anything it would not have waited
+    for anyway. A task one of them starts and awaits is covered by waiting
+    for it.
+    """
+    current = asyncio.current_task()
+    if current is None or not _closing_generator(current):
         return
-    try:
-        close(None, session)
-    except Exception:  # pragma: no cover - best effort, as in fsspec
-        pass
+    others = [
+        task for task in asyncio.all_tasks()
+        if task is not current and _closing_generator(task)
+    ]
+    if others:
+        await asyncio.wait(others)
 
 
 async def _close_on_shutdown(
-    loop: tx.Any, per_loop: tx.Dict[tx.Any, tx.Any]
+    per_loop: tx.Dict[tx.Any, tx.Any],
 ) -> tx.AsyncIterator[None]:
     """Hold a loop's filesystems; close their sessions when it shuts down.
 
-    Started once per loop and kept in that loop's cache, so the loop tracks
-    it as a live async generator. `loop.shutdown_asyncgens()` -- which
-    `asyncio.run` calls after cancelling the remaining tasks and before
-    closing the loop -- closes it, and this `finally` then closes every
-    session the loop's filesystems hold, on the loop they were opened on,
-    and forgets them. A failed close is passed over, so shutdown never
+    Started on a loop when the first filesystem holding a client session is
+    cached there, and kept in that loop's cache, so the loop tracks it as a
+    live async generator. `loop.shutdown_asyncgens()` -- which `asyncio.run`
+    calls after cancelling the remaining tasks and before closing the loop
+    -- closes it together with every other live generator. This `finally`
+    first waits for the others to close (their own `finally` blocks may
+    still use a session), then takes the loop's cache out of service and
+    closes every session its filesystems hold, concurrently, on the loop
+    they were opened on. A failed close is passed over, so shutdown never
     raises from here.
+
+    The frame keeps no reference to the loop: the loop is the running one
+    when the `finally` runs.
     """
     try:
         yield
     finally:
         try:
-            for fs in _filesystems(per_loop):
-                try:
-                    await _close_session(fs)
-                except Exception:
-                    pass
+            await _other_generators_closed()
         finally:
-            per_loop.clear()
+            loop = asyncio.get_running_loop()
+            # From here on no filesystem is cached on this loop, and a
+            # filesystem that needs a session is refused (`_keep`).
+            _SHUT_DOWN.add(loop)
             if _FS_BY_LOOP.get(loop) is per_loop:
                 del _FS_BY_LOOP[loop]
+            filesystems = _filesystems(per_loop)
+            per_loop.clear()
+            await asyncio.gather(
+                *[_close_session(fs) for fs in filesystems],
+                return_exceptions=True,
+            )
 
 
 def _sweep_closed_loops() -> None:
     """Drop cache entries whose loop has closed.
 
     The cache is weak on the loop, but a backend's session (aiohttp, on
-    s3fs/HTTP) captures the loop, so the value keeps the key alive and the
-    weak reference never fires. A loop shut down by `asyncio.run` has
-    already closed its sessions and left the cache; one closed without
-    `shutdown_asyncgens()` is found here, on the next resolve, and its
-    sessions' sockets are closed directly before the entry is dropped.
+    s3fs/HTTP) captures the loop, and so does the closer generator, so the
+    value keeps the key alive and the weak reference never fires. A loop
+    shut down by `asyncio.run` has already closed its sessions and left the
+    cache; one closed without `loop.shutdown_asyncgens()` is found here, on
+    the next resolve, and only forgotten. Its sessions cannot be closed any
+    more -- nothing can be awaited on a closed loop -- so their connections
+    leak, as asyncio warns they will when a loop is closed that way.
     """
     for loop in list(_FS_BY_LOOP.keys()):
         if loop.is_closed():
-            per_loop = _FS_BY_LOOP.pop(loop, None) or {}
-            for fs in _filesystems(per_loop):
-                _drop_session(fs)
+            _FS_BY_LOOP.pop(loop, None)
 
 
 def _as_timestamp(value: tx.Any) -> float:
@@ -304,21 +347,63 @@ def _stat_from_info(info: tx.Mapping[str, tx.Any]) -> os.stat_result:
     )
 
 
+def _shutting_down(loop: tx.Any) -> bool:
+    """Whether a loop has begun closing its async generators.
+
+    Known for certain once this module's closer has run on the loop; an
+    asyncio loop also says so itself from the moment `shutdown_asyncgens()`
+    is called. An async generator started after that is never closed by
+    the loop, so no closer can be started then.
+    """
+    if loop in _SHUT_DOWN:
+        return True
+    return getattr(loop, "_asyncgens_shutdown_called", False) is True
+
+
+async def _keep(
+    loop: tx.Any,
+    per_loop: tx.Dict[tx.Any, tx.Any],
+    token: tx.Any,
+    scheme: str,
+    fs: tx.Any,
+) -> None:
+    """Cache a filesystem just built on `loop`, where its session is closed.
+
+    A filesystem with no session is simply cached. One with a session is
+    cached only where a closer will close it: the loop's live closer, or one
+    started now. Once the loop has begun shutting down none can be, so the
+    session is closed at once and the operation refused.
+    """
+    if _client_session(fs) is None:
+        per_loop[token] = fs
+        return
+    live = _FS_BY_LOOP.get(loop) is per_loop
+    if live and per_loop.get(_CLOSER_KEY) is None and not _shutting_down(loop):
+        # The closer runs to its first `yield` without suspending, so no
+        # other task sees the cache between the check and the assignment.
+        closer = _close_on_shutdown(per_loop)
+        await closer.__anext__()
+        per_loop[_CLOSER_KEY] = closer
+    if live and per_loop.get(_CLOSER_KEY) is not None:
+        per_loop[token] = fs
+        return
+    try:
+        await _close_session(fs)
+    except Exception:  # pragma: no cover - best effort, as at shutdown
+        pass
+    raise RuntimeError(
+        f"cannot connect to {scheme}:// on this event loop: it is shutting "
+        "down. Do the I/O before the loop ends, or on another loop."
+    )
+
+
 async def _resolve_fs(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
     """The async filesystem for this scheme on the running loop."""
-    import fsspec
-
     _sweep_closed_loops()
     loop = asyncio.get_running_loop()
     per_loop = _FS_BY_LOOP.get(loop)
     if per_loop is None:
-        per_loop = {}
-        # The closer runs to its first `yield` without suspending, so no
-        # other task sees this loop's cache before it is in place.
-        closer = _close_on_shutdown(loop, per_loop)
-        await closer.__anext__()
-        per_loop[_CLOSER_KEY] = closer
-        _FS_BY_LOOP[loop] = per_loop
+        per_loop = _FS_BY_LOOP[loop] = {}
     token = (scheme, _freeze(dict(options)))
     fs = per_loop.get(token)
     if fs is not None:
@@ -326,35 +411,50 @@ async def _resolve_fs(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
     # One build per (loop, token): without this, a startup gather of N first
     # operations would build N filesystems (and N sessions). setdefault-style
     # lock creation is race-free because there is no await between the get and
-    # the assignment.
-    lock = per_loop.get(_LOCK_KEY)
-    if lock is None:
-        lock = per_loop[_LOCK_KEY] = asyncio.Lock()
-    async with lock:
-        fs = per_loop.get(token)
-        if fs is None:
-            # asynchronous=True runs coroutines on the awaiting loop (no loop=
-            # to pass); skip_instance_cache=True is mandatory, or fsspec's own
-            # cache (keyed by options and thread, not loop) would hand back a
-            # filesystem bound to a different loop's session.
-            # We set asynchronous/skip_instance_cache ourselves; drop them
-            # from the user options so they do not collide.
-            safe = {
-                k: v for k, v in options.items()
-                if k not in ("asynchronous", "skip_instance_cache")
-            }
-            fs = fsspec.filesystem(
-                scheme, asynchronous=True, skip_instance_cache=True, **safe
-            )
-            # s3fs/HTTP need their aiohttp session started on this loop; the
-            # base AsyncFileSystem has no set_session, so only call it when
-            # present.
-            set_session = getattr(fs, "set_session", None)
-            if set_session is not None:  # pragma: no cover - s3fs/HTTP only
-                result = set_session()
-                if inspect.isawaitable(result):
-                    await result
-            per_loop[token] = fs
+    # the assignment. The lock is kept only while a build is waited for:
+    # before Python 3.10 an asyncio.Lock holds its loop, so a lock left in the
+    # cache would keep the entry alive after the loop is dropped.
+    entry = per_loop.get(_LOCK_KEY)
+    if entry is None:
+        entry = per_loop[_LOCK_KEY] = [asyncio.Lock(), 0]
+    entry[1] += 1
+    try:
+        async with entry[0]:
+            fs = per_loop.get(token)
+            if fs is None:
+                fs = await _build(scheme, options)
+                await _keep(loop, per_loop, token, scheme, fs)
+    finally:
+        entry[1] -= 1
+        if entry[1] == 0 and per_loop.get(_LOCK_KEY) is entry:
+            del per_loop[_LOCK_KEY]
+    return fs
+
+
+async def _build(scheme: str, options: tx.Mapping[str, tx.Any]) -> tx.Any:
+    """A new async filesystem for this scheme, its session started."""
+    import fsspec
+
+    # asynchronous=True runs coroutines on the awaiting loop (no loop= to
+    # pass); skip_instance_cache=True is mandatory, or fsspec's own cache
+    # (keyed by options and thread, not loop) would hand back a filesystem
+    # bound to a different loop's session. We set asynchronous/
+    # skip_instance_cache ourselves; drop them from the user options so they
+    # do not collide.
+    safe = {
+        k: v for k, v in options.items()
+        if k not in ("asynchronous", "skip_instance_cache")
+    }
+    fs = fsspec.filesystem(
+        scheme, asynchronous=True, skip_instance_cache=True, **safe
+    )
+    # s3fs/HTTP need their aiohttp session started on this loop; the base
+    # AsyncFileSystem has no set_session, so only call it when present.
+    set_session = getattr(fs, "set_session", None)
+    if set_session is not None:  # pragma: no cover - s3fs/HTTP only
+        result = set_session()
+        if inspect.isawaitable(result):
+            await result
     return fs
 
 
