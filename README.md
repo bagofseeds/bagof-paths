@@ -171,6 +171,11 @@ For a cloud store whose library speaks async (such as `s3://` through `s3fs`),
 `AsyncPath` talks to it directly, with no threads. For every other path it runs
 the synchronous driver in a worker thread, so the same code works either way.
 
+A direct connection belongs to the event loop it was opened on, and is closed
+when that loop finishes: `asyncio.run` does this for you. A loop you run by
+hand closes its connections when you call `loop.shutdown_asyncgens()` before
+`loop.close()`, as asyncio recommends.
+
 ## Parsing without a backend
 
 Every method that only describes a path — `name`, `parent`, `suffix`,
