@@ -1,7 +1,8 @@
 """The native async cloud driver closes the client sessions it opens.
 
-In async mode, s3fs and fsspec's HTTP filesystem leave closing their aiohttp
-session to the caller, so a loop that used one must close it before it ends.
+In async mode, s3fs, gcsfs and fsspec's HTTP filesystem leave closing their
+aiohttp session to the caller, so a loop that used one must close it before
+it ends.
 Most of these tests stand in a fake ``fsspec`` module whose filesystems hold
 a recording session, so they run without fsspec installed (the 3.8 core-only
 leg too); the last one talks to a local HTTP server through the real HTTP
@@ -12,7 +13,6 @@ import asyncio
 import functools
 import gc
 import http.server
-import io
 import sys
 import threading
 import types
@@ -127,6 +127,28 @@ class _PlainFS:
         pass
 
 
+class _GCSLikeFS:
+    """A filesystem that opens its ``_session`` on its first request."""
+
+    def __init__(self, **options: object) -> None:
+        self._session = None
+
+    async def _cat_file(self, path: str, **kwargs: object) -> bytes:
+        if self._session is None:
+            self._session = _Session()
+        return b""
+
+
+class _GatedFS(_HTTPLikeFS):
+    """An HTTP-like filesystem whose session opens when the gate does."""
+
+    gate: object = None
+
+    async def set_session(self) -> _Session:
+        await _GatedFS.gate  # type: ignore[misc]
+        return await super().set_session()
+
+
 @pytest.fixture()
 def built(monkeypatch: pytest.MonkeyPatch) -> list:
     """Every filesystem the driver builds, through a fake ``fsspec``."""
@@ -135,6 +157,8 @@ def built(monkeypatch: pytest.MonkeyPatch) -> list:
         "s3like": _S3LikeFS,
         "azurelike": _AzureLikeFS,
         "plain": _PlainFS,
+        "gcslike": _GCSLikeFS,
+        "gated": _GatedFS,
     }
     made: list = []
 
@@ -305,129 +329,189 @@ def test_an_azure_like_service_client_is_closed(built: list) -> None:
     assert asyncio.run(main()).service_client.closes == 1
 
 
-def _shut_down_with(make_generator: object) -> list:
-    """Run a loop that leaves one async generator for its shutdown.
+def test_a_lazily_opened_session_is_closed(built: list) -> None:
+    async def main() -> object:
+        fs = await _resolve("gcslike")
+        # Nothing is open yet, but the loop will close what opens later.
+        assert af._CLOSER_KEY in af._FS_BY_LOOP[asyncio.get_running_loop()]
+        await fs._cat_file("/x")
+        return fs
 
-    The generator is started after the loop has a session open, and is
-    closed by ``asyncio.run`` alongside the driver's own closer. Returns
-    the exceptions the loop reported.
-    """
-    reported: list = []
-    held: list = []
-
-    async def main() -> None:
-        loop = asyncio.get_running_loop()
-        loop.set_exception_handler(
-            lambda _, context: reported.append(context.get("exception"))
-        )
-        await _resolve("httplike")
-        generator = make_generator()  # type: ignore[operator]
-        await generator.__anext__()
-        held.append(generator)
-
-    asyncio.run(main())
-    return reported
+    assert asyncio.run(main())._session.closes == 1
 
 
-def test_a_generator_finally_can_still_read(built: list) -> None:
-    _HTTPLikeFS.store["/data"] = b"payload"
-    read: list = []
+def test_a_lazy_session_never_opened_is_left_alone(built: list) -> None:
+    async def main() -> object:
+        return await _resolve("gcslike")
 
-    async def reader() -> object:
-        try:
-            yield
-        finally:
-            fs = await _resolve("httplike")
-            read.append(await fs._cat_file("/data"))
-
-    assert _shut_down_with(reader) == []
-    assert read == [b"payload"]
-    (fs,) = built
-    assert fs._session.closed and fs._session.closes == 1
+    assert asyncio.run(main())._session is None
 
 
-def test_a_buffered_write_in_a_generator_finally_is_stored(
-    built: list,
-) -> None:
-    async def logger() -> object:
-        fs = await _resolve("httplike")
-        log = af._AsyncFSFile(
-            fs, "/log", io.BytesIO(),
-            writable=True, text=False, encoding="utf-8", errors="strict",
-        )
-        try:
-            while True:
-                await log.write(b"line\n")
-                yield
-        finally:
-            await log.aclose()
-
-    assert _shut_down_with(logger) == []
-    assert _HTTPLikeFS.store == {"/log": b"line\n"}
-    (fs,) = built
-    assert fs._session.closes == 1
-
-
-def test_a_filesystem_built_during_shutdown_is_closed(built: list) -> None:
-    async def late() -> object:
-        try:
-            yield
-        finally:
-            await asyncio.sleep(0.01)
-            await _resolve("httplike", key="late")
-
-    assert _shut_down_with(late) == []
-    first, second = built
-    assert first._session.closes == 1 and second._session.closes == 1
-
-
-def test_no_session_is_opened_after_the_loop_shut_down(built: list) -> None:
+def test_a_finished_loop_refuses_and_builds_nothing(built: list) -> None:
     loop = asyncio.new_event_loop()
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             loop.run_until_complete(_resolve("httplike"))
             loop.run_until_complete(loop.shutdown_asyncgens())
-            with pytest.raises(RuntimeError, match="shutting down"):
-                loop.run_until_complete(_resolve("httplike"))
-            # A filesystem with no session is still served.
-            assert isinstance(
-                loop.run_until_complete(_resolve("plain")), _PlainFS
-            )
+            for scheme in ("httplike", "plain"):
+                with pytest.raises(RuntimeError, match="has finished") as e:
+                    loop.run_until_complete(_resolve(scheme))
+                assert "_" not in str(e.value)
     finally:
         loop.close()
-    first, refused, _ = built
-    assert first._session.closes == 1
-    # The refused filesystem's session is closed, not leaked.
-    assert refused._session.closes == 1
+    assert len(built) == 1 and built[0]._session.closes == 1
+    assert loop not in af._FS_BY_LOOP
 
 
-def test_no_first_session_is_opened_while_the_loop_shuts_down(
+def test_a_build_under_way_when_the_loop_finishes_is_closed(
     built: list,
 ) -> None:
-    errors: list = []
-    held: list = []
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_resolve("httplike"))
+        _GatedFS.gate = loop.create_future()
+        late = loop.create_task(_resolve("gated"))
+        loop.run_until_complete(asyncio.sleep(0))
+        loop.run_until_complete(loop.shutdown_asyncgens())
+        _GatedFS.gate.set_result(None)  # type: ignore[attr-defined]
+        with pytest.raises(RuntimeError, match="has finished"):
+            loop.run_until_complete(late)
+    finally:
+        loop.close()
+    first, gated = built
+    assert first._session.closes == 1 and gated._session.closes == 1
+    assert loop not in af._FS_BY_LOOP
 
-    async def first_use() -> object:
+
+def test_shutdown_waits_for_no_other_generator(built: list) -> None:
+    # A generator collected mid-iteration is closed in a task of its own;
+    # this one never finishes. shutdown_asyncgens() does not wait for it,
+    # and the closer must not either.
+    never = None
+
+    async def worker() -> object:
         try:
             yield
         finally:
-            try:
-                await _resolve("httplike")
-            except RuntimeError as error:
-                errors.append(error)
+            await never  # type: ignore[misc]
 
-    async def main() -> None:
-        generator = first_use()
+    async def main() -> object:
+        nonlocal never
+        never = asyncio.get_running_loop().create_future()
+        fs = await _resolve("httplike")
+        generator = worker()
+        await generator.__anext__()
+        del generator
+        gc.collect()
+        await asyncio.sleep(0.01)
+        return fs
+
+    loop = asyncio.new_event_loop()
+    try:
+        fs = loop.run_until_complete(main())
+        loop.run_until_complete(
+            asyncio.wait_for(loop.shutdown_asyncgens(), 5)
+        )
+        assert fs._session.closes == 1
+        never.cancel()  # type: ignore[union-attr]
+        loop.run_until_complete(asyncio.sleep(0))
+    finally:
+        loop.close()
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 12), reason="eager tasks are new in 3.12"
+)
+def test_an_eager_task_factory_shuts_down_cleanly(built: list) -> None:
+    reported: list = []
+    held: list = []
+
+    async def other() -> object:
+        try:
+            yield
+        finally:
+            await asyncio.sleep(0)
+
+    async def main() -> object:
+        fs = await _resolve("httplike")
+        generator = other()
         await generator.__anext__()
         held.append(generator)
+        return fs
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        asyncio.run(main())
-    assert len(errors) == 1 and "shutting down" in str(errors[0])
-    (refused,) = built
-    assert refused._session.closes == 1
+    loop = asyncio.new_event_loop()
+    loop.set_exception_handler(lambda _, context: reported.append(context))
+    loop.set_task_factory(asyncio.eager_task_factory)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            fs = loop.run_until_complete(main())
+            loop.run_until_complete(
+                asyncio.wait_for(loop.shutdown_asyncgens(), 5)
+            )
+    finally:
+        loop.close()
+    assert fs._session.closes == 1
+    assert reported == []
+
+
+def test_loops_on_many_threads_share_the_cache(built: list) -> None:
+    # Each thread keeps many loops open at once, so the cache is large
+    # while other threads add to it and sweep it (before 3.13 a weak
+    # dictionary is iterated in place, and an unguarded sweep raised).
+    errors: list = []
+
+    async def use() -> None:
+        await asyncio.gather(
+            *[_resolve("httplike") for _ in range(2)], _resolve("plain")
+        )
+
+    def worker() -> None:
+        loops = []
+        try:
+            for _ in range(40):
+                loop = asyncio.new_event_loop()
+                loops.append(loop)
+                loop.run_until_complete(use())
+            for i, loop in enumerate(loops):
+                if i % 2:
+                    loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+                af._sweep_closed_loops()
+        except BaseException as error:  # pragma: no cover - the failure
+            errors.append(error)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert errors == []
+    sessions = [fs._session for fs in built if isinstance(fs, _HTTPLikeFS)]
+    # One filesystem per loop; the loops that shut down closed theirs.
+    assert len(sessions) == 8 * 40
+    assert sum(session.closes for session in sessions) == 8 * 20
+    assert len(af._FS_BY_LOOP) == 0
+
+
+def test_the_closer_is_named_plainly(built: list) -> None:
+    # asyncio's own warnings about the closer (a loop dropped unclosed, say)
+    # show this name, so it names no private helper.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(_resolve("httplike"))
+        closer = af._FS_BY_LOOP[loop][af._CLOSER_KEY]
+        assert closer.__qualname__ == af._CLOSER_NAME
+        assert "_" not in af._CLOSER_NAME
+        loop.run_until_complete(loop.shutdown_asyncgens())
+    finally:
+        loop.close()
 
 
 def test_http_session_is_closed_at_the_end_of_asyncio_run(

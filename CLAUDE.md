@@ -238,24 +238,29 @@ Three things are load-bearing:
   credential objects never collide onto one filesystem.
 - **Sessions are closed by the loop's `shutdown_asyncgens()`** (#69). In
   async mode s3fs (`_s3creator`), HTTP/gcsfs (`_session`) and adlfs
-  (`service_client`) leave closing to the caller. The first filesystem with
-  a session cached on a loop starts `_close_on_shutdown`, an async generator
-  kept in that loop's cache (never for a session-less filesystem: the
-  generator's finalizer holds the loop, which would defeat the weak key; its
-  frame holds no loop). `shutdown_asyncgens()` gathers every live
-  generator's `aclose()`, so the closer's `finally` first waits for the
-  other `aclose()` tasks (`_other_generators_closed`; their `finally` blocks
-  may still do I/O through the sessions -- shutdown awaits them anyway, so
-  this adds no wait), then marks the loop in `_SHUT_DOWN`, drops its cache
-  entry and closes every session concurrently. A filesystem built while it
-  waits is cached and closed with the rest. After that -- or once an asyncio
-  loop has begun `shutdown_asyncgens()` with no closer yet -- no generator
-  can be started, so `_keep` closes a new session at once and raises
-  `RuntimeError` (a session-less filesystem is still served). Known gap: a
-  loop that does not expose `_asyncgens_shutdown_called` (uvloop keeps it
-  internal; not verified here) cannot be told to be shutting down before the
-  closer has run, so a *first* session opened during its shutdown starts a
-  closer that never runs (asyncio-style warning, session leaked).
+  (`service_client`) leave closing to the caller, and we build these
+  filesystems, so closing them is ours. The first filesystem cached on a loop
+  that *has* one of those attributes (`_holds_session`: the attribute, not
+  its value -- gcsfs opens `_session` on its first request) starts
+  `_close_on_shutdown`, an async generator kept in that loop's cache (never
+  for a session-less filesystem: the generator's finalizer holds the loop,
+  which would defeat the weak key; its frame holds no loop). Its object is
+  renamed (`_CLOSER_NAME`) so asyncio's own warnings about it name no
+  private helper. Its `finally` -- run by `shutdown_asyncgens()`, alongside
+  every other live generator's `aclose()` -- adds the loop to `_FINISHED`,
+  drops its cache entry and closes every session concurrently (failures
+  swallowed). It waits for nothing else and reads no asyncio internals, so
+  it is deterministic on any loop. A resolve on a finished loop raises
+  `RuntimeError` and builds nothing; one whose build was under way when the
+  closer ran closes what it built and raises (`_keep`). The contract, as the
+  README says: cloud I/O from another generator's cleanup during that
+  shutdown is unsupported (it races the close, or raises), and a *first*
+  session opened then starts a closer the loop never closes (leaked -- no
+  public way to tell that shutdown has begun). `_FS_BY_LOOP` and
+  `_FINISHED` are shared by every thread's loops, so `_CACHE_LOCK` guards
+  them (never across an await); a per-loop cache is only touched on its own
+  loop. Left to the backends: aiobotocore's own per-request generators,
+  and anything a backend registers for itself.
 - **fsspec is imported lazily**, inside functions, so importing the module (and
   the package) never imports fsspec -- the dependency-free core still imports
   on the 3.8 floor.
